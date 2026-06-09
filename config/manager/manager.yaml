@@ -82,6 +82,9 @@ spec:
         image: controller:latest
         imagePullPolicy: IfNotPresent
         name: manager
+        env:
+          - name: CLUSTER_ID
+            value: "e2e-cluster"
         ports: []
         securityContext:
           readOnlyRootFilesystem: false
