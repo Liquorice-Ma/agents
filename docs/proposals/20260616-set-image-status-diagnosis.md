@@ -102,11 +102,6 @@ The denominator `3` is `spec.replicas` (desired count), fixed and intuitive.
 - Under normal conditions, users only need to see progress, not diagnostics.
 - Diagnosis is needed only when stuck, matching the user's mental model.
 
-### 4. Why remove emoji symbols (checkmark, warning)?
-
-- Follows kubectl's plain-text output style for CLI consistency.
-- Plain text is easier to parse in scripts and capture in logs.
-- Avoids rendering issues across different terminal environments.
 
 ## Implementation Details
 

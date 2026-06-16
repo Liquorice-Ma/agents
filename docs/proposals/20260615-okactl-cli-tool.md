@@ -40,6 +40,7 @@ okactl scale sandboxset <name> --replicas=N        # Scale SandboxSet replicas
 okactl set image sandboxset <name> container=image # Update container images
 okactl set image status <name> [--wait]            # Check update progress
 okactl restart sandbox <name> -c <container>       # Restart containers via OpenKruise CRR
+okactl create suo -l <selector> container=image    # Create SandboxUpdateOps for claimed sandboxes
 ```
 
 All commands support resource short names: `sandboxset` → `sbs`, `sandbox` → `sbx`.

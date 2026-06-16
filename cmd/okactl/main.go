@@ -49,8 +49,10 @@ func main() {
 	setCmd.GroupID = "resource"
 	restartCmd := cli.NewRestartCommand(globalOpts)
 	restartCmd.GroupID = "resource"
+	createCmd := cli.NewCreateCommand(globalOpts)
+	createCmd.GroupID = "resource"
 
-	root.AddCommand(scaleCmd, setCmd, restartCmd)
+	root.AddCommand(scaleCmd, setCmd, restartCmd, createCmd)
 
 	// Assign group ID to auto-generated commands (completion, help)
 	for _, cmd := range root.Commands() {
