@@ -67,10 +67,10 @@ For SandboxSets using a TemplateRef, modify the referenced SandboxTemplate direc
   okactl -n agent-system set image sbs my-pool app=myregistry.com/app:v2
 
   # Check update progress after set image
-  okactl set image status my-pool
+  okactl status sbs my-pool
 
   # Wait for update to complete (diagnoses issues if stalled)
-  okactl set image status my-pool --wait`,
+  okactl status sbs my-pool --wait`,
 		Args: cobra.MinimumNArgs(3),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			switch args[0] {
@@ -81,7 +81,6 @@ For SandboxSets using a TemplateRef, modify the referenced SandboxTemplate direc
 			}
 		},
 	}
-	cmd.AddCommand(newSetImageStatusCommand(globalOpts))
 	return cmd
 }
 
@@ -159,37 +158,6 @@ func runSetImageWithClient(client apiv1alpha1.ApiV1alpha1Interface, o *setImageO
 
 	fmt.Printf("sandboxset.agents.kruise.io/%s image updated (%s)\n", name, strings.Join(updated, ", "))
 	return nil
-}
-
-// newSetImageStatusCommand returns the "set image status" subcommand.
-func newSetImageStatusCommand(globalOpts *GlobalOptions) *cobra.Command {
-	var wait bool
-
-	cmd := &cobra.Command{
-		Use:   "status NAME",
-		Short: "Show the update progress of a SandboxSet",
-		Long: `Show the rolling update progress of a SandboxSet after "set image".
-
-Displays how many replicas have been updated and how many are available.
-If the update is stalled, automatically diagnoses the issue by checking
-sandbox and pod status (e.g., ImagePullBackOff, insufficient resources).
-With --wait, polls every 3 seconds until the update is fully complete.`,
-		Example: `  # Show current update progress
-  okactl set image status openclaw-sbs
-
-  # Wait for the update to complete (with automatic diagnostics if stalled)
-  okactl set image status openclaw-sbs --wait`,
-		Args: cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			client, err := globalOpts.AgentsClient()
-			if err != nil {
-				return err
-			}
-			return runSetImageStatusWithClient(client, globalOpts, args[0], wait)
-		},
-	}
-	cmd.Flags().BoolVarP(&wait, "wait", "w", false, "Wait for the update to complete")
-	return cmd
 }
 
 func runSetImageStatusWithClient(client apiv1alpha1.ApiV1alpha1Interface, globalOpts *GlobalOptions, name string, wait bool) error {

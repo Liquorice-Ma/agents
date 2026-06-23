@@ -79,30 +79,55 @@ func TestNewScaleCommand(t *testing.T) {
 	assert.NotNil(t, sbsCmd)
 	assert.Contains(t, sbsCmd.Use, "sandboxset")
 
+	// Verify "sbs" alias resolves to the same subcommand
+	sbsAliasCmd, _, err := cmd.Find([]string{"sbs"})
+	assert.NoError(t, err)
+	assert.Equal(t, sbsCmd, sbsAliasCmd)
+
 	// Verify sandboxset has the replicas flag
 	replicasFlag := sbsCmd.Flags().Lookup("replicas")
 	assert.NotNil(t, replicasFlag)
 }
 
-func TestNewSetImageStatusCommand(t *testing.T) {
+func TestNewStatusCommand(t *testing.T) {
 	globalOpts := NewGlobalOptions()
-	cmd := NewSetCommand(globalOpts)
+	cmd := NewStatusCommand(globalOpts)
 
-	// Find the image subcommand
-	imageCmd, _, err := cmd.Find([]string{"image"})
+	assert.Equal(t, "status", cmd.Use)
+	assert.NotEmpty(t, cmd.Short)
+	assert.True(t, cmd.HasSubCommands())
+
+	// Verify "sbs" subcommand exists
+	sbsCmd, _, err := cmd.Find([]string{"sbs"})
 	assert.NoError(t, err)
-	assert.NotNil(t, imageCmd)
+	assert.NotNil(t, sbsCmd)
+	assert.Contains(t, sbsCmd.Use, "sbs")
 
-	// Find the status subcommand under image
-	statusCmd, _, err := imageCmd.Find([]string{"status"})
+	// Verify "sandboxset" alias resolves to the same subcommand
+	sandboxsetCmd, _, err := cmd.Find([]string{"sandboxset"})
 	assert.NoError(t, err)
-	assert.NotNil(t, statusCmd)
-	assert.Contains(t, statusCmd.Use, "status")
+	assert.Equal(t, sbsCmd, sandboxsetCmd)
 
-	// Verify the --wait flag
-	waitFlag := statusCmd.Flags().Lookup("wait")
+	// Verify the --wait flag on sbs
+	waitFlag := sbsCmd.Flags().Lookup("wait")
 	assert.NotNil(t, waitFlag)
 	assert.Equal(t, "w", waitFlag.Shorthand)
+
+	// Verify "suo" subcommand exists
+	suoCmd, _, err := cmd.Find([]string{"suo"})
+	assert.NoError(t, err)
+	assert.NotNil(t, suoCmd)
+	assert.Contains(t, suoCmd.Use, "suo")
+
+	// Verify "sandboxupdateops" alias resolves to the same subcommand
+	suoAliasCmd, _, err := cmd.Find([]string{"sandboxupdateops"})
+	assert.NoError(t, err)
+	assert.Equal(t, suoCmd, suoAliasCmd)
+
+	// Verify the --wait flag on suo
+	suoWaitFlag := suoCmd.Flags().Lookup("wait")
+	assert.NotNil(t, suoWaitFlag)
+	assert.Equal(t, "w", suoWaitFlag.Shorthand)
 }
 
 func TestCreateSuoCommandRequiresSelector(t *testing.T) {
@@ -217,4 +242,91 @@ func TestCreateSuoRunEmptySelectorFails(t *testing.T) {
 	err := o.run([]string{"main=nginx:2.0"})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "--selector (-l) is required")
+}
+
+// RunE closure tests: verify cobra command execution paths hit AgentsClient error
+
+func TestScaleSandboxsetRunEInvalidConfig(t *testing.T) {
+	origFn := inClusterConfigFn
+	defer func() { inClusterConfigFn = origFn }()
+	inClusterConfigFn = func() (*rest.Config, error) {
+		return nil, fmt.Errorf("not in cluster")
+	}
+
+	cmd := NewScaleCommand(&GlobalOptions{
+		KubeConfig: "/nonexistent/config",
+		Namespace:  "default",
+	})
+	cmd.SetArgs([]string{"sandboxset", "test-sbs", "--replicas=5"})
+	err := cmd.Execute()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to build kubeconfig")
+}
+
+func TestScaleSbsAliasRunEInvalidConfig(t *testing.T) {
+	origFn := inClusterConfigFn
+	defer func() { inClusterConfigFn = origFn }()
+	inClusterConfigFn = func() (*rest.Config, error) {
+		return nil, fmt.Errorf("not in cluster")
+	}
+
+	cmd := NewScaleCommand(&GlobalOptions{
+		KubeConfig: "/nonexistent/config",
+		Namespace:  "default",
+	})
+	cmd.SetArgs([]string{"sbs", "test-sbs", "--replicas=5"})
+	err := cmd.Execute()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to build kubeconfig")
+}
+
+func TestSetImageSbsRunEInvalidConfig(t *testing.T) {
+	origFn := inClusterConfigFn
+	defer func() { inClusterConfigFn = origFn }()
+	inClusterConfigFn = func() (*rest.Config, error) {
+		return nil, fmt.Errorf("not in cluster")
+	}
+
+	cmd := NewSetCommand(&GlobalOptions{
+		KubeConfig: "/nonexistent/config",
+		Namespace:  "default",
+	})
+	cmd.SetArgs([]string{"image", "sbs", "test-sbs", "app=nginx:2.0"})
+	err := cmd.Execute()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to build kubeconfig")
+}
+
+func TestRestartSandboxRunEInvalidConfig(t *testing.T) {
+	origFn := inClusterConfigFn
+	defer func() { inClusterConfigFn = origFn }()
+	inClusterConfigFn = func() (*rest.Config, error) {
+		return nil, fmt.Errorf("not in cluster")
+	}
+
+	cmd := NewRestartCommand(&GlobalOptions{
+		KubeConfig: "/nonexistent/config",
+		Namespace:  "default",
+	})
+	cmd.SetArgs([]string{"sandbox", "test-sbx"})
+	err := cmd.Execute()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to build kubeconfig")
+}
+
+func TestCreateSuoRunEInvalidConfig(t *testing.T) {
+	origFn := inClusterConfigFn
+	defer func() { inClusterConfigFn = origFn }()
+	inClusterConfigFn = func() (*rest.Config, error) {
+		return nil, fmt.Errorf("not in cluster")
+	}
+
+	cmd := NewCreateCommand(&GlobalOptions{
+		KubeConfig: "/nonexistent/config",
+		Namespace:  "default",
+	})
+	cmd.SetArgs([]string{"suo", "-l", "app=test", "app=nginx:2.0"})
+	err := cmd.Execute()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to build kubeconfig")
 }

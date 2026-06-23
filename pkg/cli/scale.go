@@ -49,8 +49,9 @@ func newScaleSandboxSetCommand(globalOpts *GlobalOptions) *cobra.Command {
 	o := &scaleOptions{global: globalOpts}
 
 	cmd := &cobra.Command{
-		Use:   "sandboxset NAME --replicas=N",
-		Short: "Scale a SandboxSet to the specified number of replicas",
+		Use:     "sandboxset NAME --replicas=N",
+		Aliases: []string{"sbs"},
+		Short:   "Scale a SandboxSet to the specified number of replicas",
 		Long: `Scale a SandboxSet to the specified number of idle sandbox replicas.
 
 The SandboxSet maintains a pool of pre-warmed, idle Sandbox instances.
@@ -58,6 +59,9 @@ Scaling up adds more idle sandboxes; scaling down removes excess ones.
 Setting --replicas=0 drains the pool entirely.`,
 		Example: `  # Scale the pool to 5 idle sandboxes
   okactl scale sandboxset my-pool --replicas=5
+
+  # Use the short name "sbs"
+  okactl scale sbs my-pool --replicas=5
 
   # Drain the pool completely
   okactl scale sandboxset my-pool --replicas=0

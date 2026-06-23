@@ -97,8 +97,8 @@ var _ = Describe("okactl CLI", func() {
 			}
 			Expect(k8sClient.Create(ctx, sbs)).To(Succeed())
 
-			By("Running okactl scale sandboxset to 3 replicas")
-			output, err := runOkactl("-n", namespace, "scale", "sandboxset", sbs.Name, "--replicas=3")
+			By("Running okactl scale sbs to 3 replicas (using short name)")
+			output, err := runOkactl("-n", namespace, "scale", "sbs", sbs.Name, "--replicas=3")
 			Expect(err).NotTo(HaveOccurred(), "okactl output: %s", output)
 			Expect(output).To(ContainSubstring("scaled to 3"))
 
@@ -109,7 +109,7 @@ var _ = Describe("okactl CLI", func() {
 		})
 
 		It("should fail when SandboxSet does not exist", func() {
-			output, err := runOkactl("-n", namespace, "scale", "sandboxset", "non-existent-sbs", "--replicas=2")
+			output, err := runOkactl("-n", namespace, "scale", "sbs", "non-existent-sbs", "--replicas=2")
 			Expect(err).To(HaveOccurred())
 			Expect(output).To(ContainSubstring("failed to get sandboxset"))
 		})
@@ -142,8 +142,8 @@ var _ = Describe("okactl CLI", func() {
 			}
 			Expect(k8sClient.Create(ctx, sbs)).To(Succeed())
 
-			By("Running okactl set image sandboxset")
-			output, err := runOkactl("-n", namespace, "set", "image", "sandboxset", sbs.Name, "app=nginx:1.27")
+			By("Running okactl set image sbs (using short name)")
+			output, err := runOkactl("-n", namespace, "set", "image", "sbs", sbs.Name, "app=nginx:1.27")
 			Expect(err).NotTo(HaveOccurred(), "okactl output: %s", output)
 			Expect(output).To(ContainSubstring("image updated"))
 
@@ -178,7 +178,7 @@ var _ = Describe("okactl CLI", func() {
 			}
 			Expect(k8sClient.Create(ctx, sbs)).To(Succeed())
 
-			output, err := runOkactl("-n", namespace, "set", "image", "sandboxset", sbs.Name, "nonexistent=nginx:1.27")
+			output, err := runOkactl("-n", namespace, "set", "image", "sbs", sbs.Name, "nonexistent=nginx:1.27")
 			Expect(err).To(HaveOccurred())
 			Expect(output).To(ContainSubstring("not found"))
 		})
@@ -321,6 +321,75 @@ var _ = Describe("okactl CLI", func() {
 		})
 	})
 
+	Context("status sbs", func() {
+		It("should show the update progress of a SandboxSet", func() {
+			By("Creating a SandboxSet with 1 replica")
+			sbs := &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("okactl-status-sbs-%d", time.Now().UnixNano()),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					Replicas: 1,
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:    "app",
+										Image:   "nginx:1.25",
+										Command: []string{"sleep", "infinity"},
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sbs)).To(Succeed())
+
+			By("Running okactl status sbs")
+			output, err := runOkactl("-n", namespace, "status", "sbs", sbs.Name)
+			Expect(err).NotTo(HaveOccurred(), "okactl output: %s", output)
+			Expect(output).To(ContainSubstring(sbs.Name))
+		})
+
+		It("should fail when SandboxSet does not exist", func() {
+			output, err := runOkactl("-n", namespace, "status", "sbs", "non-existent-sbs")
+			Expect(err).To(HaveOccurred())
+			Expect(output).To(ContainSubstring("failed to get sandboxset"))
+		})
+	})
+
+	Context("status suo", func() {
+		It("should show the progress of a SandboxUpdateOps", func() {
+			By("Creating a SandboxUpdateOps")
+			suo := &agentsv1alpha1.SandboxUpdateOps{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("okactl-status-suo-%d", time.Now().UnixNano()),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
+					Selector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{"okactl-test": "status-suo"},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, suo)).To(Succeed())
+
+			By("Running okactl status suo")
+			output, err := runOkactl("-n", namespace, "status", "suo", suo.Name)
+			Expect(err).NotTo(HaveOccurred(), "okactl output: %s", output)
+			Expect(output).To(ContainSubstring(suo.Name))
+		})
+
+		It("should fail when SandboxUpdateOps does not exist", func() {
+			output, err := runOkactl("-n", namespace, "status", "suo", "non-existent-suo")
+			Expect(err).To(HaveOccurred())
+			Expect(output).To(ContainSubstring("failed to get sandboxupdateops"))
+		})
+	})
+
 	Context("error handling", func() {
 		It("should show help for unknown subcommands", func() {
 			output, err := runOkactl("unknown-command")
@@ -329,7 +398,7 @@ var _ = Describe("okactl CLI", func() {
 		})
 
 		It("should require --replicas flag for scale", func() {
-			output, err := runOkactl("-n", namespace, "scale", "sandboxset", "some-sbs")
+			output, err := runOkactl("-n", namespace, "scale", "sbs", "some-sbs")
 			Expect(err).To(HaveOccurred())
 			Expect(strings.ToLower(output)).To(ContainSubstring("required"))
 		})

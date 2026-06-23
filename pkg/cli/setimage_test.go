@@ -728,3 +728,201 @@ func TestSetImageStatusWithWait(t *testing.T) {
 	err := runSetImageStatusWithClient(cs.ApiV1alpha1(), globalOpts, "test-sbs", true)
 	assert.NoError(t, err)
 }
+
+func TestIsSuoComplete(t *testing.T) {
+	tests := []struct {
+		name     string
+		suo      *agentsv1alpha1.SandboxUpdateOps
+		expected bool
+	}{
+		{
+			name: "phase is Completed",
+			suo: &agentsv1alpha1.SandboxUpdateOps{
+				Status: agentsv1alpha1.SandboxUpdateOpsStatus{
+					Phase:            agentsv1alpha1.SandboxUpdateOpsCompleted,
+					Replicas:         2,
+					UpdatedReplicas:  2,
+					UpdatingReplicas: 0,
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "all updated and no updating",
+			suo: &agentsv1alpha1.SandboxUpdateOps{
+				Status: agentsv1alpha1.SandboxUpdateOpsStatus{
+					Phase:            agentsv1alpha1.SandboxUpdateOpsUpdating,
+					Replicas:         2,
+					UpdatedReplicas:  2,
+					UpdatingReplicas: 0,
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "updating in progress",
+			suo: &agentsv1alpha1.SandboxUpdateOps{
+				Status: agentsv1alpha1.SandboxUpdateOpsStatus{
+					Phase:            agentsv1alpha1.SandboxUpdateOpsUpdating,
+					Replicas:         2,
+					UpdatedReplicas:  1,
+					UpdatingReplicas: 1,
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "pending phase",
+			suo: &agentsv1alpha1.SandboxUpdateOps{
+				Status: agentsv1alpha1.SandboxUpdateOpsStatus{
+					Phase:    agentsv1alpha1.SandboxUpdateOpsPending,
+					Replicas: 2,
+				},
+			},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := isSuoComplete(tt.suo)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestPrintSuoStatus(t *testing.T) {
+	tests := []struct {
+		name string
+		suo  *agentsv1alpha1.SandboxUpdateOps
+	}{
+		{
+			name: "updating",
+			suo: &agentsv1alpha1.SandboxUpdateOps{
+				ObjectMeta: metav1.ObjectMeta{Name: "suo-test"},
+				Status: agentsv1alpha1.SandboxUpdateOpsStatus{
+					Phase:            agentsv1alpha1.SandboxUpdateOpsUpdating,
+					Replicas:         2,
+					UpdatedReplicas:  0,
+					UpdatingReplicas: 1,
+					FailedReplicas:   0,
+				},
+			},
+		},
+		{
+			name: "completed",
+			suo: &agentsv1alpha1.SandboxUpdateOps{
+				ObjectMeta: metav1.ObjectMeta{Name: "suo-test"},
+				Status: agentsv1alpha1.SandboxUpdateOpsStatus{
+					Phase:            agentsv1alpha1.SandboxUpdateOpsCompleted,
+					Replicas:         2,
+					UpdatedReplicas:  2,
+					UpdatingReplicas: 0,
+					FailedReplicas:   0,
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Just verify it doesn't panic
+			printSuoStatus(tt.suo)
+		})
+	}
+}
+
+func TestRunSuoStatusWithClient(t *testing.T) {
+	tests := []struct {
+		name        string
+		suoName     string
+		namespace   string
+		suo         *agentsv1alpha1.SandboxUpdateOps
+		expectError string
+	}{
+		{
+			name:        "suo not found",
+			suoName:     "nonexistent",
+			namespace:   "default",
+			suo:         nil,
+			expectError: "failed to get sandboxupdateops",
+		},
+		{
+			name:      "suo updating",
+			suoName:   "suo-test",
+			namespace: "default",
+			suo: &agentsv1alpha1.SandboxUpdateOps{
+				ObjectMeta: metav1.ObjectMeta{Name: "suo-test", Namespace: "default"},
+				Spec:       agentsv1alpha1.SandboxUpdateOpsSpec{},
+				Status: agentsv1alpha1.SandboxUpdateOpsStatus{
+					Phase:            agentsv1alpha1.SandboxUpdateOpsUpdating,
+					Replicas:         2,
+					UpdatedReplicas:  1,
+					UpdatingReplicas: 1,
+				},
+			},
+		},
+		{
+			name:      "suo completed",
+			suoName:   "suo-test",
+			namespace: "default",
+			suo: &agentsv1alpha1.SandboxUpdateOps{
+				ObjectMeta: metav1.ObjectMeta{Name: "suo-test", Namespace: "default"},
+				Spec:       agentsv1alpha1.SandboxUpdateOpsSpec{},
+				Status: agentsv1alpha1.SandboxUpdateOpsStatus{
+					Phase:            agentsv1alpha1.SandboxUpdateOpsCompleted,
+					Replicas:         2,
+					UpdatedReplicas:  2,
+					UpdatingReplicas: 0,
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cs := fake.NewSimpleClientset()
+			if tt.suo != nil {
+				_, err := cs.ApiV1alpha1().Sandboxupdateops(tt.namespace).Create(
+					context.TODO(), tt.suo, metav1.CreateOptions{},
+				)
+				assert.NoError(t, err)
+			}
+			globalOpts := &GlobalOptions{Namespace: tt.namespace}
+
+			err := runSuoStatusWithClient(cs.ApiV1alpha1(), globalOpts, tt.suoName, false)
+
+			if tt.expectError != "" {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestWaitForSuoComplete(t *testing.T) {
+	// Test with --wait where SUO is already complete
+	suo := &agentsv1alpha1.SandboxUpdateOps{
+		ObjectMeta: metav1.ObjectMeta{Name: "suo-test", Namespace: "default"},
+		Spec:       agentsv1alpha1.SandboxUpdateOpsSpec{},
+		Status: agentsv1alpha1.SandboxUpdateOpsStatus{
+			Phase:            agentsv1alpha1.SandboxUpdateOpsCompleted,
+			Replicas:         2,
+			UpdatedReplicas:  2,
+			UpdatingReplicas: 0,
+		},
+	}
+
+	cs := fake.NewSimpleClientset()
+	_, err := cs.ApiV1alpha1().Sandboxupdateops("default").Create(
+		context.TODO(), suo, metav1.CreateOptions{},
+	)
+	assert.NoError(t, err)
+
+	globalOpts := &GlobalOptions{Namespace: "default"}
+
+	err = runSuoStatusWithClient(cs.ApiV1alpha1(), globalOpts, "suo-test", true)
+	assert.NoError(t, err)
+}
