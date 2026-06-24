@@ -2,7 +2,7 @@
 title: "okactl: Status Command, Short Name Aliases, and Help Display Optimization"
 authors:
   - "@mahe"
-creation-date: 2026-06-20
+creation-date: 2026-06-24
 status: implemented
 ---
 
@@ -37,7 +37,7 @@ After implementing the `okactl` CLI tool, users faced several usability issues:
 - Created a top-level `okactl status` command group.
 - `okactl status sbs NAME` shows SandboxSet rolling update progress.
 - `okactl status suo NAME` shows SandboxUpdateOps batch update progress.
-- Both support `--wait` flag for polling until completion.
+- The `--wait` flag is exclusive to the `set image` command (not `status`), reflecting the "operation-then-wait" workflow.
 
 ### 2. Short Name Aliases via Cobra `Aliases`
 
@@ -75,20 +75,20 @@ Available Commands:
 
 **Command format**:
 ```bash
-okactl status sbs NAME [--wait]
+okactl status sbs NAME
 ```
 
 **Features**:
 - Reads the SandboxSet's `status.updatedReplicas` and `status.availableReplicas` fields.
 - Display format: `my-pool  Updating  1/3 updated  1/3 available`
 - Shows `Complete` when `updatedReplicas == spec.replicas && availableReplicas == spec.replicas`.
-- In `--wait` mode, polls every 3 seconds until the update is fully complete.
+- Performs a one-shot status check with auto-diagnosis when the update appears stalled.
 
 ### 5. Auto-Diagnosis Mechanism
 
 **Trigger conditions**:
 - When the user runs `okactl status sbs`, if the update is not progressing, diagnosis runs immediately.
-- In `--wait` mode, if progress does not change for 3 consecutive polls (~10 seconds), diagnosis is triggered.
+- In `set image --wait` mode, if progress does not change for 3 consecutive polls (~10 seconds), diagnosis is triggered.
 
 **Diagnosis logic** (three-layer error source):
 ```
@@ -104,7 +104,7 @@ openclaw-sbs  Updating  0/3 updated  0/3 available
   Sandbox openclaw-sbs-yyy is Pending: 0/3 nodes are available: insufficient cpu
 ```
 
-**Deduplication**: Uses a `map[string]bool` to track reported sandboxes, preventing repeated output in `--wait` mode.
+**Deduplication**: Uses a `map[string]bool` to track reported sandboxes, preventing repeated output in `set image --wait` mode.
 
 ### 6. Status Display Optimization
 
@@ -124,26 +124,20 @@ The denominator `3` is `spec.replicas` (desired count), fixed and intuitive.
 
 **Command format**:
 ```bash
-okactl status suo NAME [--wait]
+okactl status suo NAME
 ```
 
 **Features**:
 - Reads the SandboxUpdateOps' `status.phase`, `status.replicas`, `status.updatedReplicas`, `status.updatingReplicas`, and `status.failedReplicas` fields.
 - Display format: `suo-zk7h7  Updating   0/2 updated  1 updating  0 failed`
 - Shows `Completed` when `status.phase == Completed` or all replicas are updated and none are updating.
-- In `--wait` mode, polls every 3 seconds until the operation completes or fails.
+- Performs a one-shot status check; use `set image --wait` for polling.
 - Returns an error if the SUO enters the `Failed` phase.
 
 **Output example**:
 ```
 $ okactl status suo suo-zk7h7
 suo-zk7h7                      Updating   0/2 updated  1 updating  0 failed
-
-$ okactl status suo suo-zk7h7 --wait
-suo-zk7h7                      Updating   0/2 updated  1 updating  0 failed
-suo-zk7h7                      Updating   1/2 updated  1 updating  0 failed
-suo-zk7h7                      Completed  2/2 updated  0 updating  0 failed
-Update completed (2/2 updated)
 ```
 
 ## Key Design Decisions
@@ -188,12 +182,12 @@ Update completed (2/2 updated)
 
 | File | Change |
 |------|--------|
-| `pkg/cli/status.go` | **New file**. Implements `NewStatusCommand`, `newStatusSandboxSetCommand`, `newStatusSandboxUpdateOpsCommand`, `runSetImageStatusWithClient`, `runSuoStatusWithClient`, `waitForSandboxSetUpdate`, `waitForSuoComplete`, `isSuoComplete`, `printSuoStatus`, `printSandboxSetStatus`, `diagnoseSandboxSetUpdate`. |
+| `pkg/cli/status.go` | **New file**. Implements `NewStatusCommand`, `newStatusSandboxSetCommand`, `newStatusSandboxUpdateOpsCommand`, `runSetImageStatusWithClient`, `runSuoStatusWithClient`, `waitForSandboxSetUpdate`, `isSuoComplete`, `printSuoStatus`, `printSandboxSetStatus`, `diagnoseSandboxSetUpdate`. |
 | `pkg/cli/scale.go` | Added `Aliases: []string{"sbs"}` to `sandboxset` subcommand. Updated examples. |
 | `pkg/cli/setimage.go` | Removed `newSetImageStatusCommand` function and its registration. Updated examples to reference `okactl status sbs` instead of `okactl set image status`. |
 | `cmd/okactl/main.go` | Added `strings` import. Registered custom `join` template function. Set custom usage template. Registered `statusCmd` under Resource Commands group. |
 | `pkg/cli/commands_test.go` | Replaced `TestNewSetImageStatusCommand` with `TestNewStatusCommand` covering both `sbs` and `suo` subcommands. Added `sbs` alias test for scale command. |
-| `pkg/cli/setimage_test.go` | Added `TestIsSuoComplete`, `TestPrintSuoStatus`, `TestRunSuoStatusWithClient`, `TestWaitForSuoComplete`. |
+| `pkg/cli/setimage_test.go` | Added `TestIsSuoComplete`, `TestPrintSuoStatus`, `TestRunSuoStatusWithClient`, `TestWaitForSandboxSetUpdate`. |
 
 ### Core Functions
 
@@ -202,7 +196,6 @@ Update completed (2/2 updated)
 - `newStatusSandboxSetCommand`: `status sbs` subcommand (alias: `sandboxset`).
 - `newStatusSandboxUpdateOpsCommand`: `status suo` subcommand (alias: `sandboxupdateops`).
 - `runSuoStatusWithClient`: SUO status query entry point.
-- `waitForSuoComplete`: SUO polling logic with failure detection.
 - `isSuoComplete`: Checks if SUO is fully updated.
 - `printSuoStatus`: One-line SUO status display.
 - `runSetImageStatusWithClient`: SandboxSet status query entry point (moved from setimage.go).
@@ -216,14 +209,13 @@ Update completed (2/2 updated)
 
 ### Test Coverage
 
-- `TestNewStatusCommand`: Verifies `sbs`/`sandboxset` and `suo`/`sandboxupdateops` subcommands and their `--wait` flags.
+- `TestNewStatusCommand`: Verifies `sbs`/`sandboxset` and `suo`/`sandboxupdateops` subcommands and confirms `--wait` is NOT a status flag.
 - `TestSetImageStatus`: Covers sandboxset not found, update complete, and updating in progress.
-- `TestSetImageStatusWithWait`: Tests `--wait` mode with immediate completion.
+- `TestWaitForSandboxSetUpdate`: Tests `set image --wait` mode with immediate completion.
 - `TestIsSandboxSetUpdateComplete`: Covers complete, in-progress, updated-but-unavailable, and zero-replicas.
 - `TestIsSuoComplete`: Covers Completed phase, all-updated, in-progress, and Pending phase.
 - `TestPrintSuoStatus`: Covers updating and completed phases.
 - `TestRunSuoStatusWithClient`: Covers SUO not found, updating, and completed states.
-- `TestWaitForSuoComplete`: Tests `--wait` with immediate completion.
 - `TestDiagnoseSandboxSetUpdate`: Covers skip-diagnosis, Pending with message, Failed, scheduling failure, ImagePullBackOff, no pod, and Running skip.
 
 ## Usage Examples
@@ -237,7 +229,8 @@ sandboxset.agents.kruise.io/openclaw-sbs image updated (gateway)
 $ okactl status sbs openclaw-sbs
 openclaw-sbs                       Updating   0/3 updated  0/3 available
 
-$ okactl status sbs openclaw-sbs --wait
+$ okactl set image sbs openclaw-sbs gateway=nginx:1.27 --wait
+sandboxset.agents.kruise.io/openclaw-sbs image updated (gateway)
 openclaw-sbs                       Updating   0/3 updated  0/3 available
 openclaw-sbs                       Updating   1/3 updated  1/3 available
 openclaw-sbs                       Updating   2/3 updated  2/3 available
@@ -280,12 +273,6 @@ sandboxupdateops.agents.kruise.io/suo-zk7h7 created (selector: agents.kruise.io/
 
 $ okactl status suo suo-zk7h7
 suo-zk7h7                          Updating   0/2 updated  1 updating  0 failed
-
-$ okactl status suo suo-zk7h7 --wait
-suo-zk7h7                          Updating   0/2 updated  1 updating  0 failed
-suo-zk7h7                          Updating   1/2 updated  1 updating  0 failed
-suo-zk7h7                          Completed  2/2 updated  0 updating  0 failed
-Update completed (2/2 updated)
 ```
 
 ### Help Output with Aliases
@@ -322,6 +309,6 @@ Available Commands:
 ## Future Work
 
 - Add `--output` flag to status commands for JSON/YAML output.
-- Add timeout parameter (e.g., `--timeout=5m`) to prevent indefinite waiting in `--wait` mode.
+- Add timeout parameter (e.g., `--timeout=5m`) to prevent indefinite waiting in `set image --wait` mode.
 - Add `okactl status sbx` for individual Sandbox status.
 - Add `okactl status cp` for Checkpoint operation status.

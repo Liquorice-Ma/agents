@@ -287,7 +287,7 @@ func TestSetImageStatus(t *testing.T) {
 			cs := fake.NewSimpleClientset(tt.objects...)
 			globalOpts := &GlobalOptions{Namespace: tt.namespace}
 
-			err := runSetImageStatusWithClient(cs.ApiV1alpha1(), globalOpts, tt.sbsName, false)
+			err := runSetImageStatusWithClient(cs.ApiV1alpha1(), globalOpts, tt.sbsName)
 
 			if tt.expectError != "" {
 				assert.Error(t, err)
@@ -683,8 +683,8 @@ func TestPrintSandboxSetStatus(t *testing.T) {
 	}
 }
 
-func TestSetImageStatusWithWait(t *testing.T) {
-	// Test with --wait where SandboxSet is already complete
+func TestWaitForSandboxSetUpdate(t *testing.T) {
+	// Test --wait where SandboxSet is already complete
 	sbs := &agentsv1alpha1.SandboxSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-sbs", Namespace: "default"},
 		Spec:       agentsv1alpha1.SandboxSetSpec{Replicas: 3},
@@ -694,7 +694,7 @@ func TestSetImageStatusWithWait(t *testing.T) {
 	cs := fake.NewSimpleClientset(sbs)
 	globalOpts := &GlobalOptions{Namespace: "default"}
 
-	err := runSetImageStatusWithClient(cs.ApiV1alpha1(), globalOpts, "test-sbs", true)
+	err := waitForSandboxSetUpdate(cs.ApiV1alpha1(), context.TODO(), "default", "test-sbs", globalOpts)
 	assert.NoError(t, err)
 }
 
@@ -859,7 +859,7 @@ func TestRunSuoStatusWithClient(t *testing.T) {
 			}
 			globalOpts := &GlobalOptions{Namespace: tt.namespace}
 
-			err := runSuoStatusWithClient(cs.ApiV1alpha1(), globalOpts, tt.suoName, false)
+			err := runSuoStatusWithClient(cs.ApiV1alpha1(), globalOpts, tt.suoName)
 
 			if tt.expectError != "" {
 				assert.Error(t, err)
@@ -869,29 +869,4 @@ func TestRunSuoStatusWithClient(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestWaitForSuoComplete(t *testing.T) {
-	// Test with --wait where SUO is already complete
-	suo := &agentsv1alpha1.SandboxUpdateOps{
-		ObjectMeta: metav1.ObjectMeta{Name: "suo-test", Namespace: "default"},
-		Spec:       agentsv1alpha1.SandboxUpdateOpsSpec{},
-		Status: agentsv1alpha1.SandboxUpdateOpsStatus{
-			Phase:            agentsv1alpha1.SandboxUpdateOpsCompleted,
-			Replicas:         2,
-			UpdatedReplicas:  2,
-			UpdatingReplicas: 0,
-		},
-	}
-
-	cs := fake.NewSimpleClientset()
-	_, err := cs.ApiV1alpha1().Sandboxupdateops("default").Create(
-		context.TODO(), suo, metav1.CreateOptions{},
-	)
-	assert.NoError(t, err)
-
-	globalOpts := &GlobalOptions{Namespace: "default"}
-
-	err = runSuoStatusWithClient(cs.ApiV1alpha1(), globalOpts, "suo-test", true)
-	assert.NoError(t, err)
 }

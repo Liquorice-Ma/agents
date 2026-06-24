@@ -108,10 +108,8 @@ func TestNewStatusCommand(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, sbsCmd, sandboxsetCmd)
 
-	// Verify the --wait flag on sbs
-	waitFlag := sbsCmd.Flags().Lookup("wait")
-	assert.NotNil(t, waitFlag)
-	assert.Equal(t, "w", waitFlag.Shorthand)
+	// Verify the --wait flag is NOT on sbs (it belongs to "set image", not "status")
+	assert.Nil(t, sbsCmd.Flags().Lookup("wait"))
 
 	// Verify "suo" subcommand exists
 	suoCmd, _, err := cmd.Find([]string{"suo"})
@@ -124,10 +122,8 @@ func TestNewStatusCommand(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, suoCmd, suoAliasCmd)
 
-	// Verify the --wait flag on suo
-	suoWaitFlag := suoCmd.Flags().Lookup("wait")
-	assert.NotNil(t, suoWaitFlag)
-	assert.Equal(t, "w", suoWaitFlag.Shorthand)
+	// Verify the --wait flag is NOT on suo (it belongs to "set image", not "status")
+	assert.Nil(t, suoCmd.Flags().Lookup("wait"))
 }
 
 func TestCreateSuoCommandRequiresSelector(t *testing.T) {

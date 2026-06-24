@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -129,8 +130,8 @@ func runCreateSuoWithClient(client apiv1alpha1.ApiV1alpha1Interface, o *createSu
 		return fmt.Errorf("no sandboxes found matching selector %q in namespace %q", o.selector, ns)
 	}
 
-	// Validate container names against the first matching sandbox
-	if err := validateSuoImageContainers(&matched[0], images); err != nil {
+	// Validate container names against all matching sandboxes
+	if err := validateSuoImageContainers(matched, images); err != nil {
 		return err
 	}
 
@@ -144,16 +145,19 @@ func runCreateSuoWithClient(client apiv1alpha1.ApiV1alpha1Interface, o *createSu
 		return err
 	}
 
+	labelSelector, err := metav1.ParseToLabelSelector(o.selector)
+	if err != nil {
+		return fmt.Errorf("invalid label selector %q: %w", o.selector, err)
+	}
+
 	suo := &agentsv1alpha1.SandboxUpdateOps{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: "suo-",
 			Namespace:    ns,
 		},
 		Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
-			Selector: &metav1.LabelSelector{
-				MatchLabels: parseSuoSelectorToMap(o.selector),
-			},
-			Patch: runtime.RawExtension{Raw: patchData},
+			Selector: labelSelector,
+			Patch:    runtime.RawExtension{Raw: patchData},
 		},
 	}
 
@@ -194,36 +198,38 @@ func buildSuoImagePatch(images map[string]string) ([]byte, error) {
 	return json.Marshal(patch)
 }
 
-// validateSuoImageContainers checks that all container names in images exist in the sandbox.
-func validateSuoImageContainers(sbx *agentsv1alpha1.Sandbox, images map[string]string) error {
-	known := make(map[string]bool)
-	if sbx.Spec.Template != nil {
-		for _, c := range sbx.Spec.Template.Spec.Containers {
-			known[c.Name] = true
+// validateSuoImageContainers checks that container names in images exist in the matched sandboxes.
+// If a container name is missing from ALL sandboxes, it returns an error (likely a typo).
+// If a container name is missing from SOME sandboxes, it prints a warning but does not fail,
+// because different sandboxes may use different template versions with varying container sets.
+func validateSuoImageContainers(sandboxes []agentsv1alpha1.Sandbox, images map[string]string) error {
+	missingCount := make(map[string]int)
+	for i := range sandboxes {
+		sbx := &sandboxes[i]
+		known := make(map[string]bool)
+		if sbx.Spec.Template != nil {
+			for _, c := range sbx.Spec.Template.Spec.Containers {
+				known[c.Name] = true
+			}
+			for _, c := range sbx.Spec.Template.Spec.InitContainers {
+				known[c.Name] = true
+			}
 		}
-		for _, c := range sbx.Spec.Template.Spec.InitContainers {
-			known[c.Name] = true
+		for name := range images {
+			if !known[name] {
+				missingCount[name]++
+				fmt.Printf("Warning: container %q not found in sandbox %q\n", name, sbx.Name)
+			}
 		}
 	}
 
-	for name := range images {
-		if !known[name] {
-			return fmt.Errorf("container %q not found in sandbox %q", name, sbx.Name)
+	// If a container is missing from ALL sandboxes, it is likely a typo
+	for name, count := range missingCount {
+		if count == len(sandboxes) {
+			return fmt.Errorf("container %q not found in any of the %d matching sandboxes", name, len(sandboxes))
 		}
 	}
 	return nil
-}
-
-// parseSuoSelectorToMap parses a simple "key=value,key2=value2" label selector into a map.
-func parseSuoSelectorToMap(selector string) map[string]string {
-	result := make(map[string]string)
-	for _, pair := range strings.Split(selector, ",") {
-		parts := strings.SplitN(pair, "=", 2)
-		if len(parts) == 2 {
-			result[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
-		}
-	}
-	return result
 }
 
 // formatSuoImagePairs formats a map of container=image pairs as a slice of "container=image" strings.
@@ -302,7 +308,7 @@ func waitForSUODeletion(client apiv1alpha1.ApiV1alpha1Interface, ns, name string
 	for elapsed := time.Duration(0); elapsed < maxWait; elapsed += pollInterval {
 		_, err := client.Sandboxupdateops(ns).Get(context.TODO(), name, metav1.GetOptions{})
 		if err != nil {
-			if strings.Contains(err.Error(), "not found") {
+			if apierrors.IsNotFound(err) {
 				return nil
 			}
 			return fmt.Errorf("failed to check SandboxUpdateOps %q deletion: %w", name, err)

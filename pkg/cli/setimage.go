@@ -172,13 +172,9 @@ func runSetImageWithClient(client apiv1alpha1.ApiV1alpha1Interface, o *setImageO
 	return nil
 }
 
-func runSetImageStatusWithClient(client apiv1alpha1.ApiV1alpha1Interface, globalOpts *GlobalOptions, name string, wait bool) error {
+func runSetImageStatusWithClient(client apiv1alpha1.ApiV1alpha1Interface, globalOpts *GlobalOptions, name string) error {
 	ctx := context.TODO()
 	ns := globalOpts.Namespace
-
-	if wait {
-		return waitForSandboxSetUpdate(client, ctx, ns, name, globalOpts)
-	}
 
 	sbs, err := client.SandboxSets(ns).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {

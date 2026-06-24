@@ -92,7 +92,7 @@ func TestCreateSuo(t *testing.T) {
 			expectError:   "no sandboxes found",
 		},
 		{
-			name:      "container not found in sandbox",
+			name:      "container not found in any matching sandbox",
 			selector:  "app=my-app",
 			imageArgs: []string{"nonexistent=foo:1.0"},
 			seedSandboxes: []*agentsv1alpha1.Sandbox{
@@ -100,7 +100,17 @@ func TestCreateSuo(t *testing.T) {
 					{Name: "main", Image: "nginx:1.0"},
 				}),
 			},
-			expectError: "container \"nonexistent\" not found",
+			expectError: "not found in any of the 1 matching sandboxes",
+		},
+		{
+			name:      "complex selector with set-based matching",
+			selector:  "app in (my-app, other-app)",
+			imageArgs: []string{"main=nginx:2.0"},
+			seedSandboxes: []*agentsv1alpha1.Sandbox{
+				makeSandbox("sbx-1", map[string]string{"app": "my-app"}, []corev1.Container{
+					{Name: "main", Image: "nginx:1.0"},
+				}),
+			},
 		},
 		{
 			name:          "invalid image argument format",
@@ -348,40 +358,57 @@ func TestFormatSuoImagePairs(t *testing.T) {
 }
 
 func TestValidateSuoImageContainers(t *testing.T) {
-	sbx := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-sbx", Namespace: "default"},
-		Spec: agentsv1alpha1.SandboxSpec{
-			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
-				Template: &corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{Name: "app", Image: "nginx:1.0"},
+	makeSandbox := func(name string, containers []corev1.Container) agentsv1alpha1.Sandbox {
+		return agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+			Spec: agentsv1alpha1.SandboxSpec{
+				EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+					Template: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: containers,
 						},
 					},
 				},
 			},
-		},
+		}
 	}
 
 	tests := []struct {
 		name        string
+		sandboxes   []agentsv1alpha1.Sandbox
 		images      map[string]string
 		expectError string
 	}{
 		{
-			name:   "container exists",
-			images: map[string]string{"app": "nginx:2.0"},
+			name:      "container exists in all sandboxes",
+			sandboxes: []agentsv1alpha1.Sandbox{makeSandbox("sbx-1", []corev1.Container{{Name: "app", Image: "nginx:1.0"}})},
+			images:    map[string]string{"app": "nginx:2.0"},
 		},
 		{
-			name:        "container not found",
+			name:        "container not found in any sandbox",
+			sandboxes:   []agentsv1alpha1.Sandbox{makeSandbox("sbx-1", []corev1.Container{{Name: "app", Image: "nginx:1.0"}})},
 			images:      map[string]string{"nonexistent": "nginx:2.0"},
-			expectError: "container \"nonexistent\" not found",
+			expectError: "not found in any of the 1 matching sandboxes",
+		},
+		{
+			name: "container missing from some sandboxes (warning, not error)",
+			sandboxes: []agentsv1alpha1.Sandbox{
+				makeSandbox("sbx-1", []corev1.Container{{Name: "app", Image: "nginx:1.0"}, {Name: "sidecar", Image: "envoy:1.0"}}),
+				makeSandbox("sbx-2", []corev1.Container{{Name: "app", Image: "nginx:1.0"}}),
+			},
+			images: map[string]string{"sidecar": "envoy:2.0"},
+		},
+		{
+			name:        "container missing from all sandboxes (error)",
+			sandboxes:   []agentsv1alpha1.Sandbox{makeSandbox("sbx-1", []corev1.Container{{Name: "app", Image: "nginx:1.0"}}), makeSandbox("sbx-2", []corev1.Container{{Name: "app", Image: "nginx:1.0"}})},
+			images:      map[string]string{"nonexistent": "nginx:2.0"},
+			expectError: "not found in any of the 2 matching sandboxes",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateSuoImageContainers(sbx, tt.images)
+			err := validateSuoImageContainers(tt.sandboxes, tt.images)
 			if tt.expectError != "" {
 				assert.Error(t, err)
 				assert.Contains(t, err.Error(), tt.expectError)
@@ -463,32 +490,6 @@ func TestBuildSuoImagePatch(t *testing.T) {
 			assert.Contains(t, string(data), tt.contains)
 			assert.Contains(t, string(data), `"containers"`)
 			assert.NotContains(t, string(data), `"template"`, "patch should not contain 'template' layer - SUO patch is applied directly to PodTemplateSpec")
-		})
-	}
-}
-
-func TestParseSuoSelectorToMap(t *testing.T) {
-	tests := []struct {
-		name     string
-		selector string
-		expected map[string]string
-	}{
-		{
-			name:     "single pair",
-			selector: "app=my-app",
-			expected: map[string]string{"app": "my-app"},
-		},
-		{
-			name:     "multiple pairs",
-			selector: "app=my-app,env=prod",
-			expected: map[string]string{"app": "my-app", "env": "prod"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := parseSuoSelectorToMap(tt.selector)
-			assert.Equal(t, tt.expected, result)
 		})
 	}
 }

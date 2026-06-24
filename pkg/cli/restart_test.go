@@ -67,6 +67,9 @@ func TestRestartSandbox(t *testing.T) {
 					},
 				},
 			},
+			Status: agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxRunning,
+			},
 		}
 	}
 
@@ -80,6 +83,9 @@ func TestRestartSandbox(t *testing.T) {
 				EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 					TemplateRef: &agentsv1alpha1.SandboxTemplateRef{Name: "my-template"},
 				},
+			},
+			Status: agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxRunning,
 			},
 		}
 	}
@@ -158,6 +164,35 @@ func TestRestartSandbox(t *testing.T) {
 			namespace:   "default",
 			containers:  []string{"main"},
 			expectError: "failed to get sandbox",
+		},
+		{
+			name:        "sandbox not running",
+			sandboxName: "pending-sbx",
+			namespace:   "default",
+			containers:  []string{"main"},
+			seedSandboxes: []*agentsv1alpha1.Sandbox{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "pending-sbx",
+						Namespace: "default",
+					},
+					Spec: agentsv1alpha1.SandboxSpec{
+						EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+							Template: &corev1.PodTemplateSpec{
+								Spec: corev1.PodSpec{
+									Containers: []corev1.Container{
+										{Name: "main", Image: "nginx:1.0"},
+									},
+								},
+							},
+						},
+					},
+					Status: agentsv1alpha1.SandboxStatus{
+						Phase: agentsv1alpha1.SandboxPending,
+					},
+				},
+			},
+			expectError: "is not running",
 		},
 		{
 			name:           "templateRef sandbox without -c flag",

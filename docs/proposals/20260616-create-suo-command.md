@@ -57,7 +57,7 @@ Contains:
 - `runCreateSuoWithClient()` - Core logic: validate, build patch, create SUO
 
 Helper functions:
-- `parseSuoContainerImages()` - Parse container=image arguments
+- `parseImageArgs()` - Parse container=image arguments (shared with `set image`, defined in `setimage.go`)
 - `buildSuoImagePatch()` - Build Strategic Merge Patch JSON
 - `validateSuoImageContainers()` - Verify container names exist
 - `parseSuoSelectorToMap()` - Parse selector string to map
@@ -221,3 +221,16 @@ okactl create suo -l selector container=image
 - **pkg/cli/create_test.go**: New file, ~150 lines, 9 test cases
 - **cmd/okactl/main.go**: Added 3 lines to register create command
 - **docs/proposals/20260615-okactl-cli-tool.md**: Updated Summary section
+
+## Implementation History
+
+- 2026-06-16: Initial implementation of `create suo` command
+- 2026-06-24: Code review fixes:
+  - Selector parsing: replaced `parseSuoSelectorToMap` with `metav1.ParseToLabelSelector`
+    to support full label selector syntax (`key in (v1,v2)`, `key!=value`, etc.), ensuring
+    consistency with the `labels.Parse` used for sandbox matching
+  - Container validation: `validateSuoImageContainers` now checks all matching sandboxes
+    instead of only the first; prints warnings for partial mismatches, errors only when
+    a container is missing from ALL sandboxes
+  - Error handling: `waitForSUODeletion` now uses `apierrors.IsNotFound` instead of
+    string matching for K8s not-found errors

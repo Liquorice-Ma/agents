@@ -19,7 +19,6 @@ package cli
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -43,8 +42,6 @@ These commands help you monitor the progress of resource updates.`,
 }
 
 func newStatusSandboxSetCommand(globalOpts *GlobalOptions) *cobra.Command {
-	var wait bool
-
 	cmd := &cobra.Command{
 		Use:     "sbs NAME",
 		Aliases: []string{"sandboxset"},
@@ -53,56 +50,44 @@ func newStatusSandboxSetCommand(globalOpts *GlobalOptions) *cobra.Command {
 
 Displays how many replicas have been updated and how many are available.
 If the update is stalled, automatically diagnoses the issue by checking
-sandbox and pod status (e.g., ImagePullBackOff, insufficient resources).
-With --wait, polls every 3 seconds until the update is fully complete.`,
+sandbox and pod status (e.g., ImagePullBackOff, insufficient resources).`,
 		Example: `  # Show current update progress
-  okactl status sbs openclaw-sbs
-
-  # Wait for the update to complete (with automatic diagnostics if stalled)
-  okactl status sbs openclaw-sbs --wait`,
+  okactl status sbs openclaw-sbs`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := globalOpts.AgentsClient()
 			if err != nil {
 				return err
 			}
-			return runSetImageStatusWithClient(client, globalOpts, args[0], wait)
+			return runSetImageStatusWithClient(client, globalOpts, args[0])
 		},
 	}
-	cmd.Flags().BoolVarP(&wait, "wait", "w", false, "Wait for the update to complete")
 	return cmd
 }
 
 func newStatusSandboxUpdateOpsCommand(globalOpts *GlobalOptions) *cobra.Command {
-	var wait bool
-
 	cmd := &cobra.Command{
 		Use:     "suo NAME",
 		Aliases: []string{"sandboxupdateops"},
 		Short:   "Show the update progress of a SandboxUpdateOps",
 		Long: `Show the progress of a SandboxUpdateOps batch update operation.
 
-Displays the current phase, total/updated/updating/failed replica counts.
-With --wait, polls every 3 seconds until the operation completes or fails.`,
+Displays the current phase, total/updated/updating/failed replica counts.`,
 		Example: `  # Show current SUO progress
-  okactl status suo suo-zk7h7
-
-  # Wait for the SUO to complete
-  okactl status suo suo-zk7h7 --wait`,
+  okactl status suo suo-zk7h7`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := globalOpts.AgentsClient()
 			if err != nil {
 				return err
 			}
-			return runSuoStatusWithClient(client, globalOpts, args[0], wait)
+			return runSuoStatusWithClient(client, globalOpts, args[0])
 		},
 	}
-	cmd.Flags().BoolVarP(&wait, "wait", "w", false, "Wait for the update to complete")
 	return cmd
 }
 
-func runSuoStatusWithClient(client apiv1alpha1.ApiV1alpha1Interface, globalOpts *GlobalOptions, name string, wait bool) error {
+func runSuoStatusWithClient(client apiv1alpha1.ApiV1alpha1Interface, globalOpts *GlobalOptions, name string) error {
 	ctx := context.TODO()
 	ns := globalOpts.Namespace
 
@@ -111,41 +96,8 @@ func runSuoStatusWithClient(client apiv1alpha1.ApiV1alpha1Interface, globalOpts 
 		return fmt.Errorf("failed to get sandboxupdateops %q: %w", name, err)
 	}
 
-	if wait {
-		return waitForSuoComplete(client, ctx, ns, name, suo)
-	}
-
 	printSuoStatus(suo)
 	return nil
-}
-
-func waitForSuoComplete(client apiv1alpha1.ApiV1alpha1Interface, ctx context.Context, ns, name string, initial *agentsv1alpha1.SandboxUpdateOps) error {
-	const pollInterval = 3 * time.Second
-	suo := initial
-
-	for {
-		printSuoStatus(suo)
-
-		if isSuoComplete(suo) {
-			fmt.Printf("Update completed (%d/%d updated)\n",
-				suo.Status.UpdatedReplicas, suo.Status.Replicas)
-			return nil
-		}
-
-		if suo.Status.Phase == agentsv1alpha1.SandboxUpdateOpsFailed {
-			return fmt.Errorf("update failed: %d/%d updated, %d failed",
-				suo.Status.UpdatedReplicas, suo.Status.Replicas,
-				suo.Status.FailedReplicas)
-		}
-
-		time.Sleep(pollInterval)
-
-		var err error
-		suo, err = client.Sandboxupdateops(ns).Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
-			return fmt.Errorf("failed to get sandboxupdateops %q: %w", name, err)
-		}
-	}
 }
 
 // isSuoComplete checks if all replicas have been successfully updated.

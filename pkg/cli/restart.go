@@ -107,6 +107,13 @@ func runRestartWithClients(agentsClient apiv1alpha1.ApiV1alpha1Interface, dynCli
 		return fmt.Errorf("failed to get sandbox %q: %w", sandboxName, err)
 	}
 
+	// Check if the sandbox is running before creating a CRR.
+	// CRR operates on container processes within a Pod; a non-Running sandbox
+	// may not have a scheduled Pod or its Pod may have already terminated.
+	if sbx.Status.Phase != agentsv1alpha1.SandboxRunning {
+		return fmt.Errorf("sandbox %q is not running (current phase: %s)", sandboxName, sbx.Status.Phase)
+	}
+
 	containers := o.containers
 	if len(containers) == 0 {
 		containers, err = extractContainerNames(ctx, agentsClient, sbx)

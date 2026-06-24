@@ -67,7 +67,7 @@ okactl status sbs my-pool
 okactl create suo -l app=my-app app=nginx:1.25
 
 # Check SUO batch update progress
-okactl status suo <name> --wait
+okactl status suo <name>
 
 # Restart a misbehaving container (without pod restart)
 okactl restart sbx my-sandbox -c app
@@ -134,8 +134,8 @@ checking sandbox and pod status (e.g., ImagePullBackOff, insufficient resources)
 
 ## 3. Status
 
-Check the update progress of SandboxSet or SandboxUpdateOps resources. Supports polling with `--wait` and
-auto-diagnosis when the update appears stuck.
+Check the update progress of SandboxSet or SandboxUpdateOps resources. Performs a one-shot status check
+with auto-diagnosis when the update appears stuck.
 
 ### 3.1 Status SandboxSet (`status sbs`)
 
@@ -146,7 +146,6 @@ okactl status sandboxset <name> [flags]
 
 | Flag | Short | Required | Description |
 |------|-------|----------|-------------|
-| `--wait` | `-w` | No | Poll every 3s until all replicas are updated and available |
 | `--namespace` | `-n` | No | Target namespace (default: `default`) |
 
 **Output format**: `my-pool  Updating  1/3 updated  1/3 available`
@@ -159,11 +158,8 @@ When a rollout appears stuck, the command automatically diagnoses potential issu
 **Examples**:
 
 ```bash
-# One-shot status check
+# One-shot status check with auto-diagnosis
 okactl status sbs my-pool -n staging
-
-# Wait for completion with auto-diagnosis
-okactl status sbs my-pool --wait -n production
 ```
 
 ### 3.2 Status SandboxUpdateOps (`status suo`)
@@ -175,7 +171,6 @@ okactl status sandboxupdateops <name> [flags]
 
 | Flag | Short | Required | Description |
 |------|-------|----------|-------------|
-| `--wait` | `-w` | No | Poll every 3s until the SUO completes or fails |
 | `--namespace` | `-n` | No | Target namespace (default: `default`) |
 
 **Output format**: `suo-zk7h7  Updating   0/2 updated  1 updating  0 failed`
@@ -186,10 +181,7 @@ Returns an error if the SUO enters the `Failed` phase.
 
 ```bash
 # Check SUO progress
-okactl status suo suo-zk7h7
-
-# Wait for SUO completion
-okactl status suo suo-zk7h7 --wait -n production
+okactl status suo suo-zk7h7 -n production
 ```
 
 ---
@@ -208,8 +200,11 @@ okactl restart sandbox <name> -c <container> [-c <container> ...] [flags]
 | `--container` | `-c` | Yes | Container name(s) to restart (repeatable) |
 | `--namespace` | `-n` | No | Target namespace (default: `default`) |
 
-> **Prerequisite**: The OpenKruise
-> [ContainerRecreateRequest CRD](https://openkruise.io/docs/user-manuals/containerrecreaterequest) must be installed.
+> **Prerequisites**:
+> - The OpenKruise [ContainerRecreateRequest CRD](https://openkruise.io/docs/user-manuals/containerrecreaterequest)
+>   must be installed.
+> - The target sandbox must be in `Running` phase. Restarting containers in a Pending or
+>   Failed sandbox has no effect and will return an error.
 
 ### Examples
 
@@ -240,7 +235,11 @@ okactl create suo -l <key=value> <container=image> [container=image ...] [flags]
 ### Validation
 
 - The selector must match at least one existing sandbox
-- Container names must exist in the matched sandbox's pod spec
+- The selector supports full Kubernetes label selector syntax, including `key=value`,
+  `key!=value`, `key in (v1,v2)`, and `!key`
+- Container names are validated against **all** matching sandboxes; if a container is missing
+  from some sandboxes, a warning is printed but the SUO is still created. If a container is
+  missing from **all** matching sandboxes, an error is returned
 - Image arguments must be in `container=image` format
 
 ### Examples
@@ -281,7 +280,7 @@ okactl create suo -l agents.kruise.io/claim-name=my-claim \
     app=my-registry/interpreter:v2.0 -n sandbox-system
 
 # 5. Check SUO batch update progress
-okactl status suo <suo-name> --wait -n sandbox-system
+okactl status suo <suo-name> -n sandbox-system
 
 # 6. Restart a misbehaving container
 okactl restart sbx code-interpreter-abc12 -c app -n sandbox-system

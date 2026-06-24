@@ -233,3 +233,5 @@ pkg/cli/
 - 2026-06-15: Separated `set image` to sandboxset-only; added `set image status` subcommand
   with `--wait` flag for checking rolling update progress; removed SUO integration (deferred
   to future `create suo` command)
+- 2026-06-24: Added Running phase check to `restart sandbox` command; returns error if
+  sandbox is not in Running state before creating CRR
