@@ -109,7 +109,7 @@ func runRestartWithClients(agentsClient apiv1alpha1.ApiV1alpha1Interface, dynCli
 
 	containers := o.containers
 	if len(containers) == 0 {
-		containers, err = extractContainerNames(sbx)
+		containers, err = extractContainerNames(ctx, agentsClient, sbx)
 		if err != nil {
 			return err
 		}
@@ -117,7 +117,7 @@ func runRestartWithClients(agentsClient apiv1alpha1.ApiV1alpha1Interface, dynCli
 			return fmt.Errorf("sandbox %q has no containers to restart", sandboxName)
 		}
 	} else {
-		if err := validateContainerNames(sbx, containers); err != nil {
+		if err := validateContainerNames(ctx, agentsClient, sbx, containers); err != nil {
 			return err
 		}
 	}
@@ -159,30 +159,61 @@ func runRestartWithClients(agentsClient apiv1alpha1.ApiV1alpha1Interface, dynCli
 	return nil
 }
 
-func extractContainerNames(sbx *agentsv1alpha1.Sandbox) ([]string, error) {
-	if sbx.Spec.Template == nil {
-		return nil, fmt.Errorf("sandbox %q uses a TemplateRef; cannot auto-detect containers, specify -c explicitly", sbx.Name)
-	}
-	var names []string
-	for _, c := range sbx.Spec.Template.Spec.Containers {
-		names = append(names, c.Name)
-	}
-	return names, nil
-}
-
-func validateContainerNames(sbx *agentsv1alpha1.Sandbox, requested []string) error {
-	known := make(map[string]bool)
+// fetchContainerNames retrieves container and init-container names from the sandbox's
+// inline Template, or from the referenced SandboxTemplate when Template is nil.
+// This allows both extractContainerNames and validateContainerNames to work with
+// sandboxes that use TemplateRef instead of an inline Template.
+func fetchContainerNames(ctx context.Context, agentsClient apiv1alpha1.ApiV1alpha1Interface, sbx *agentsv1alpha1.Sandbox) (containers, initContainers []string, err error) {
 	if sbx.Spec.Template != nil {
 		for _, c := range sbx.Spec.Template.Spec.Containers {
-			known[c.Name] = true
+			containers = append(containers, c.Name)
 		}
 		for _, c := range sbx.Spec.Template.Spec.InitContainers {
-			known[c.Name] = true
+			initContainers = append(initContainers, c.Name)
 		}
+		return containers, initContainers, nil
 	}
 
-	if sbx.Spec.Template == nil {
-		return nil
+	if sbx.Spec.TemplateRef == nil {
+		return nil, nil, fmt.Errorf("sandbox %q has no template or templateRef", sbx.Name)
+	}
+
+	sbt, err := agentsClient.SandboxTemplates(sbx.Namespace).Get(ctx, sbx.Spec.TemplateRef.Name, metav1.GetOptions{})
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get SandboxTemplate %q referenced by sandbox %q: %w", sbx.Spec.TemplateRef.Name, sbx.Name, err)
+	}
+	if sbt.Spec.Template == nil {
+		return nil, nil, fmt.Errorf("SandboxTemplate %q has no template defined", sbx.Spec.TemplateRef.Name)
+	}
+	for _, c := range sbt.Spec.Template.Spec.Containers {
+		containers = append(containers, c.Name)
+	}
+	for _, c := range sbt.Spec.Template.Spec.InitContainers {
+		initContainers = append(initContainers, c.Name)
+	}
+	return containers, initContainers, nil
+}
+
+func extractContainerNames(ctx context.Context, agentsClient apiv1alpha1.ApiV1alpha1Interface, sbx *agentsv1alpha1.Sandbox) ([]string, error) {
+	containers, _, err := fetchContainerNames(ctx, agentsClient, sbx)
+	if err != nil {
+		return nil, err
+	}
+	return containers, nil
+}
+
+func validateContainerNames(ctx context.Context, agentsClient apiv1alpha1.ApiV1alpha1Interface, sbx *agentsv1alpha1.Sandbox, requested []string) error {
+	containers, initContainers, err := fetchContainerNames(ctx, agentsClient, sbx)
+	if err != nil {
+		return err
+	}
+
+	known := make(map[string]bool)
+	for _, name := range containers {
+		known[name] = true
+	}
+	for _, name := range initContainers {
+		known[name] = true
 	}
 
 	for _, name := range requested {

@@ -25,6 +25,7 @@ import (
 	"github.com/spf13/cobra"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
@@ -33,6 +34,7 @@ import (
 
 type setImageOptions struct {
 	global *GlobalOptions
+	wait   bool
 }
 
 // NewSetCommand returns the "set" command with its subcommands.
@@ -56,7 +58,11 @@ func newSetImageCommand(globalOpts *GlobalOptions) *cobra.Command {
 		Short: "Update container images of a SandboxSet",
 		Long: `Update one or more container images in a SandboxSet's inline template.
 This command only works with SandboxSets that use an inline template (spec.template).
-For SandboxSets using a TemplateRef, modify the referenced SandboxTemplate directly.`,
+For SandboxSets using a TemplateRef, modify the referenced SandboxTemplate directly.
+
+Use --wait to poll until the rolling update is complete. When the update appears
+stalled, the command automatically diagnoses potential issues (e.g., ImagePullBackOff,
+insufficient resources) by inspecting sandbox and pod status.`,
 		Example: `  # Update the gateway container image
   okactl set image sbs openclaw-sbs gateway=mirrors-ssl.aliyuncs.com/ghcr.io/openclaw/openclaw:2026.4.24
 
@@ -66,11 +72,11 @@ For SandboxSets using a TemplateRef, modify the referenced SandboxTemplate direc
   # Update in a specific namespace
   okactl -n agent-system set image sbs my-pool app=myregistry.com/app:v2
 
-  # Check update progress after set image
-  okactl status sbs my-pool
+  # Update and wait for the rollout to complete (diagnoses issues if stalled)
+  okactl set image sbs my-pool app=myregistry.com/app:v2 --wait
 
-  # Wait for update to complete (diagnoses issues if stalled)
-  okactl status sbs my-pool --wait`,
+  # Check update progress after set image
+  okactl status sbs my-pool`,
 		Args: cobra.MinimumNArgs(3),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			switch args[0] {
@@ -81,11 +87,13 @@ For SandboxSets using a TemplateRef, modify the referenced SandboxTemplate direc
 			}
 		},
 	}
+	cmd.Flags().BoolVarP(&o.wait, "wait", "w", false, "Wait for the rollout to complete")
 	return cmd
 }
 
-// parseContainerImages parses "container=image" pairs and returns a map.
-func parseContainerImages(args []string) (map[string]string, error) {
+// parseImageArgs parses "container=image" pairs and returns a map.
+// It is shared by set image and create suo commands.
+func parseImageArgs(args []string) (map[string]string, error) {
 	images := make(map[string]string, len(args))
 	for _, arg := range args {
 		parts := strings.SplitN(arg, "=", 2)
@@ -114,11 +122,11 @@ func (o *setImageOptions) run(name string, imageArgs []string) error {
 	if err != nil {
 		return err
 	}
-	return runSetImageWithClient(client, o, name, imageArgs)
+	return runSetImageWithClient(client, o, name, imageArgs, o.wait)
 }
 
-func runSetImageWithClient(client apiv1alpha1.ApiV1alpha1Interface, o *setImageOptions, name string, imageArgs []string) error {
-	images, err := parseContainerImages(imageArgs)
+func runSetImageWithClient(client apiv1alpha1.ApiV1alpha1Interface, o *setImageOptions, name string, imageArgs []string, wait bool) error {
+	images, err := parseImageArgs(imageArgs)
 	if err != nil {
 		return err
 	}
@@ -157,6 +165,10 @@ func runSetImageWithClient(client apiv1alpha1.ApiV1alpha1Interface, o *setImageO
 	}
 
 	fmt.Printf("sandboxset.agents.kruise.io/%s image updated (%s)\n", name, strings.Join(updated, ", "))
+
+	if wait {
+		return waitForSandboxSetUpdate(client, ctx, o.global.Namespace, name, o.global)
+	}
 	return nil
 }
 
@@ -175,7 +187,8 @@ func runSetImageStatusWithClient(client apiv1alpha1.ApiV1alpha1Interface, global
 
 	printSandboxSetStatus(sbs)
 	var reported map[string]bool
-	diagnoseSandboxSetUpdate(globalOpts, sbs, &reported)
+	kubeClient, _ := globalOpts.KubeClient()
+	diagnoseSandboxSetUpdate(client, kubeClient, ns, sbs, &reported)
 	return nil
 }
 
@@ -184,6 +197,9 @@ func waitForSandboxSetUpdate(client apiv1alpha1.ApiV1alpha1Interface, ctx contex
 	var lastUpdated int32 = -1
 	var stallCount int
 	var reported map[string]bool
+
+	// Create kubeClient once for diagnosis instead of on every poll cycle
+	kubeClient, _ := globalOpts.KubeClient()
 
 	for {
 		sbs, err := client.SandboxSets(ns).Get(ctx, name, metav1.GetOptions{})
@@ -209,7 +225,7 @@ func waitForSandboxSetUpdate(client apiv1alpha1.ApiV1alpha1Interface, ctx contex
 
 		// After stalling for ~10s (3 polls), diagnose the issue
 		if stallCount >= 3 {
-			diagnoseSandboxSetUpdate(globalOpts, sbs, &reported)
+			diagnoseSandboxSetUpdate(client, kubeClient, ns, sbs, &reported)
 			stallCount = 0
 		}
 
@@ -239,23 +255,18 @@ func printSandboxSetStatus(sbs *agentsv1alpha1.SandboxSet) {
 }
 
 // diagnoseSandboxSetUpdate checks sandboxes belonging to a SandboxSet and reports any issues.
-// It builds a kubernetes client to inspect pod status when sandbox messages are empty.
-func diagnoseSandboxSetUpdate(globalOpts *GlobalOptions, sbs *agentsv1alpha1.SandboxSet, reported *map[string]bool) {
+// It uses the provided clients to inspect sandbox and pod status, avoiding repeated
+// kubeconfig reads and TLS connection setup on every call.
+func diagnoseSandboxSetUpdate(agentsClient apiv1alpha1.ApiV1alpha1Interface, kubeClient kubernetes.Interface, ns string, sbs *agentsv1alpha1.SandboxSet, reported *map[string]bool) {
 	if isSandboxSetUpdateComplete(sbs) {
 		return
 	}
 
-	client, err := globalOpts.AgentsClient()
-	if err != nil {
+	if agentsClient == nil {
 		return
 	}
 
-	kubeClient, err := globalOpts.KubeClient()
-	if err != nil {
-		return
-	}
-
-	sbxList, err := client.Sandboxes(globalOpts.Namespace).List(context.TODO(), metav1.ListOptions{
+	sbxList, err := agentsClient.Sandboxes(ns).List(context.TODO(), metav1.ListOptions{
 		LabelSelector: fmt.Sprintf("agents.kruise.io/sandbox-template=%s", sbs.Name),
 	})
 	if err != nil {
@@ -271,9 +282,9 @@ func diagnoseSandboxSetUpdate(globalOpts *GlobalOptions, sbs *agentsv1alpha1.San
 		// Check if sandbox is in a problem state
 		if sbx.Status.Phase == agentsv1alpha1.SandboxPending || sbx.Status.Phase == agentsv1alpha1.SandboxFailed {
 			msg := sbx.Status.Message
-			if msg == "" {
+			if msg == "" && kubeClient != nil {
 				// Try to get pod status for more details
-				pod, err := kubeClient.CoreV1().Pods(globalOpts.Namespace).Get(context.TODO(), sbx.Name, metav1.GetOptions{})
+				pod, err := kubeClient.CoreV1().Pods(ns).Get(context.TODO(), sbx.Name, metav1.GetOptions{})
 				if err == nil {
 					for _, cond := range pod.Status.Conditions {
 						if cond.Type == corev1.PodScheduled && cond.Status == corev1.ConditionFalse {

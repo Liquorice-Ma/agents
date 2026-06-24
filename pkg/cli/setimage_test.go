@@ -166,7 +166,7 @@ func TestSetImageSandboxSet(t *testing.T) {
 				},
 			}
 
-			err := runSetImageWithClient(cs.ApiV1alpha1(), o, tt.sbsName, tt.imageArgs)
+			err := runSetImageWithClient(cs.ApiV1alpha1(), o, tt.sbsName, tt.imageArgs, false)
 
 			if tt.expectError != "" {
 				assert.Error(t, err)
@@ -340,7 +340,7 @@ func TestParseContainerImages(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := parseContainerImages(tt.args)
+			result, err := parseImageArgs(tt.args)
 
 			if tt.expectError != "" {
 				assert.Error(t, err)
@@ -554,54 +554,23 @@ func TestDiagnoseSandboxSetUpdate(t *testing.T) {
 			}
 			kubeCS := kubernetesfake.NewSimpleClientset(objs...)
 
-			// Create a GlobalOptions that returns our fake clients
-			// diagnoseSandboxSetUpdate calls globalOpts.AgentsClient() and globalOpts.KubeClient()
-			// We need to use a mock approach. Since diagnoseSandboxSetUpdate is not easily testable
-			// without refactoring, we'll call the internal logic directly.
-			// However, diagnoseSandboxSetUpdate calls globalOpts.AgentsClient() and globalOpts.KubeClient()
-			// which need a real REST config. We'll test using a different approach:
-			// calling the function with a GlobalOptions that has a valid config.
+			var reported map[string]bool
+			diagnoseSandboxSetUpdate(agentsCS.ApiV1alpha1(), kubeCS, "default", tt.sbs, &reported)
 
-			// For diagnoseSandboxSetUpdate, we need to provide a GlobalOptions that can
-			// build clients. Since we can't easily mock that, let's test what we can.
 			if tt.expectSkip {
 				// When update is complete, the function returns early
-				var reported map[string]bool
-				diagnoseSandboxSetUpdate(&GlobalOptions{Namespace: "default"}, tt.sbs, &reported)
-				// Should not panic and reported should be nil/empty
 				assert.Empty(t, reported)
 				return
 			}
 
-			// For non-skip cases, test the diagnose function using testDiagnoseSandboxSetUpdateHelper
-			testDiagnoseSandboxSetUpdateHelper(t, agentsCS, kubeCS, tt.sbs, tt.sandboxes)
+			// For non-skip cases, verify the function ran without panic
+			// and reported maps problem sandboxes correctly
+			for _, sbx := range tt.sandboxes {
+				if sbx.Status.Phase == agentsv1alpha1.SandboxPending || sbx.Status.Phase == agentsv1alpha1.SandboxFailed {
+					assert.True(t, reported[sbx.Name], "sandbox %q should be reported", sbx.Name)
+				}
+			}
 		})
-	}
-}
-
-// testDiagnoseSandboxSetUpdateHelper tests diagnoseSandboxSetUpdate by directly
-// calling the inner logic that the function performs.
-func testDiagnoseSandboxSetUpdateHelper(
-	t *testing.T,
-	agentsCS *fake.Clientset,
-	kubeCS *kubernetesfake.Clientset,
-	sbs *agentsv1alpha1.SandboxSet,
-	sandboxes []*agentsv1alpha1.Sandbox,
-) {
-	t.Helper()
-
-	// Verify the sandboxes are listed properly
-	sbxList, err := agentsCS.ApiV1alpha1().Sandboxes("default").List(context.TODO(), metav1.ListOptions{
-		LabelSelector: fmt.Sprintf("agents.kruise.io/sandbox-template=%s", sbs.Name),
-	})
-	assert.NoError(t, err)
-	assert.Len(t, sbxList.Items, len(sandboxes))
-
-	// Verify pods can be queried
-	for _, sbx := range sandboxes {
-		_, err := kubeCS.CoreV1().Pods("default").Get(context.TODO(), sbx.Name, metav1.GetOptions{})
-		// Not all sandboxes have corresponding pods, so just ensure no crash
-		_ = err
 	}
 }
 

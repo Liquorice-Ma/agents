@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -98,7 +99,7 @@ func runCreateSuoWithClient(client apiv1alpha1.ApiV1alpha1Interface, o *createSu
 		return fmt.Errorf("--selector (-l) is required")
 	}
 
-	images, err := parseSuoContainerImages(imageArgs)
+	images, err := parseImageArgs(imageArgs)
 	if err != nil {
 		return err
 	}
@@ -166,29 +167,22 @@ func runCreateSuoWithClient(client apiv1alpha1.ApiV1alpha1Interface, o *createSu
 	return nil
 }
 
-// parseSuoContainerImages parses "container=image" pairs and returns a map.
-func parseSuoContainerImages(args []string) (map[string]string, error) {
-	images := make(map[string]string, len(args))
-	for _, arg := range args {
-		parts := strings.SplitN(arg, "=", 2)
-		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-			return nil, fmt.Errorf("invalid container=image argument %q, expected format CONTAINER=IMAGE", arg)
-		}
-		images[parts[0]] = parts[1]
-	}
-	return images, nil
-}
-
 // buildSuoImagePatch generates a Strategic Merge Patch JSON for container image updates.
 // The patch is applied to the sandbox's spec.template (PodTemplateSpec),
 // so the structure must be relative to PodTemplateSpec (spec.containers),
 // NOT relative to SandboxSpec (spec.template.spec.containers).
 func buildSuoImagePatch(images map[string]string) ([]byte, error) {
+	names := make([]string, 0, len(images))
+	for name := range images {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
 	containers := make([]map[string]string, 0, len(images))
-	for name, image := range images {
+	for _, name := range names {
 		containers = append(containers, map[string]string{
 			"name":  name,
-			"image": image,
+			"image": images[name],
 		})
 	}
 
@@ -234,14 +228,21 @@ func parseSuoSelectorToMap(selector string) map[string]string {
 
 // formatSuoImagePairs formats a map of container=image pairs as a slice of "container=image" strings.
 func formatSuoImagePairs(images map[string]string) []string {
+	names := make([]string, 0, len(images))
+	for name := range images {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
 	pairs := make([]string, 0, len(images))
-	for k, v := range images {
-		pairs = append(pairs, k+"="+v)
+	for _, name := range names {
+		pairs = append(pairs, name+"="+images[name])
 	}
 	return pairs
 }
 
-// deleteActiveSandboxUpdateOps deletes ALL existing SUOs in the namespace to avoid conflicts.
+// deleteActiveSandboxUpdateOps deletes existing SUOs that are still active (Pending or Updating)
+// in the namespace to avoid conflicts. Completed and Failed SUOs are preserved for historical reference.
 // It first removes the finalizer (if present) to ensure the SUO can be deleted immediately,
 // even if the SUO controller is not running.
 func deleteActiveSandboxUpdateOps(client apiv1alpha1.ApiV1alpha1Interface, ns string) error {
@@ -254,6 +255,12 @@ func deleteActiveSandboxUpdateOps(client apiv1alpha1.ApiV1alpha1Interface, ns st
 	for i := range list.Items {
 		suo := &list.Items[i]
 		phase := suo.Status.Phase
+
+		// Only delete SUOs that are Pending or Updating (including empty phase for newly created SUOs).
+		// Completed and Failed SUOs are left for historical reference.
+		if phase != "" && phase != agentsv1alpha1.SandboxUpdateOpsPending && phase != agentsv1alpha1.SandboxUpdateOpsUpdating {
+			continue
+		}
 
 		// Remove finalizer first to allow immediate deletion
 		// The SUO controller may not be running, so finalizer cleanup won't happen automatically

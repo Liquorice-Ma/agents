@@ -8,7 +8,7 @@ All commands support resource short names: `sandboxset` → `sbs`, `sandboxupdat
 
 ## Installation
 
-Build from source (requires Go 1.24+):
+### Build from source (requires Go 1.24+)
 
 ```bash
 make build-okactl
@@ -18,6 +18,15 @@ The binary will be output to `bin/okactl`. You can move it to your `$PATH`:
 
 ```bash
 mv bin/okactl /usr/local/bin/okactl
+```
+
+### Download pre-built binary
+
+Alternatively, you can download a pre-built binary from [GitHub Releases](https://github.com/Liquorice-Ma/agents/releases):
+
+```bash
+curl -L -o /usr/local/bin/okactl https://github.com/Liquorice-Ma/agents/releases/download/v0.1.0/okactl
+chmod +x /usr/local/bin/okactl
 ```
 
 ---
@@ -48,11 +57,11 @@ Once connected, you can manage sandbox resources:
 # Scale up a SandboxSet pool
 okactl scale sbs my-pool --replicas=10 -n production
 
-# Rolling update container images
-okactl set image sbs my-pool app=nginx:1.25
+# Rolling update container images (and wait for completion)
+okactl set image sbs my-pool app=nginx:1.25 --wait
 
-# Check update progress (or wait for completion)
-okactl status sbs my-pool --wait
+# Or check update progress separately
+okactl status sbs my-pool
 
 # Batch update images for claimed sandboxes
 okactl create suo -l app=my-app app=nginx:1.25
@@ -99,6 +108,7 @@ okactl set image sandboxset <name> <container=image> [container=image ...] [flag
 
 | Flag | Short | Required | Description |
 |------|-------|----------|-------------|
+| `--wait` | `-w` | No | Poll every 3s until all replicas are updated and available |
 | `--namespace` | `-n` | No | Target namespace (default: `default`) |
 
 > **Note**: Refuses to operate on SandboxSets using `TemplateRef`. Users should modify the referenced `SandboxTemplate`
@@ -112,7 +122,13 @@ okactl set image sbs my-pool app=nginx:1.25
 
 # Update multiple containers
 okactl set image sandboxset my-pool app=nginx:1.25 sidecar=envoy:1.28 -n staging
+
+# Update and wait for the rollout to complete
+okactl set image sbs my-pool app=nginx:1.25 --wait
 ```
+
+When `--wait` is used and the update appears stalled, the command automatically diagnoses potential issues by
+checking sandbox and pod status (e.g., ImagePullBackOff, insufficient resources).
 
 ---
 
@@ -257,11 +273,8 @@ Applied via root command persistent flags, available to all subcommands:
 # 1. Scale up the SandboxSet pool
 okactl scale sbs code-interpreter --replicas=10 -n sandbox-system
 
-# 2. Update container images
-okactl set image sbs code-interpreter app=my-registry/interpreter:v2.0 -n sandbox-system
-
-# 3. Wait for the rolling update to complete
-okactl status sbs code-interpreter --wait -n sandbox-system
+# 2. Update container images and wait for the rollout to complete
+okactl set image sbs code-interpreter app=my-registry/interpreter:v2.0 --wait -n sandbox-system
 
 # 4. Batch update images for claimed sandboxes
 okactl create suo -l agents.kruise.io/claim-name=my-claim \

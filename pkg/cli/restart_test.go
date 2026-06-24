@@ -84,12 +84,35 @@ func TestRestartSandbox(t *testing.T) {
 		}
 	}
 
+	refSandboxTemplate := func() *agentsv1alpha1.SandboxTemplate {
+		return &agentsv1alpha1.SandboxTemplate{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "my-template",
+				Namespace: "default",
+			},
+			Spec: agentsv1alpha1.SandboxTemplateSpec{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						InitContainers: []corev1.Container{
+							{Name: "init", Image: "busybox:1.0"},
+						},
+						Containers: []corev1.Container{
+							{Name: "main", Image: "nginx:1.0"},
+							{Name: "sidecar", Image: "envoy:1.0"},
+						},
+					},
+				},
+			},
+		}
+	}
+
 	tests := []struct {
 		name           string
 		sandboxName    string
 		namespace      string
 		containers     []string
 		seedSandboxes  []*agentsv1alpha1.Sandbox
+		seedTemplates  []*agentsv1alpha1.SandboxTemplate
 		expectError    string
 		expectCreated  bool
 		expectContains []string
@@ -122,12 +145,12 @@ func TestRestartSandbox(t *testing.T) {
 			expectContains: []string{"main", "sidecar"},
 		},
 		{
-			name:        "container not found",
-			sandboxName: "test-sbx",
-			namespace:   "default",
-			containers:  []string{"nonexistent"},
+			name:          "container not found",
+			sandboxName:   "test-sbx",
+			namespace:     "default",
+			containers:    []string{"nonexistent"},
 			seedSandboxes: []*agentsv1alpha1.Sandbox{inlineSandbox()},
-			expectError: "container \"nonexistent\" not found",
+			expectError:   "container \"nonexistent\" not found",
 		},
 		{
 			name:        "sandbox not found",
@@ -137,12 +160,14 @@ func TestRestartSandbox(t *testing.T) {
 			expectError: "failed to get sandbox",
 		},
 		{
-			name:        "templateRef sandbox without -c flag",
-			sandboxName: "ref-sbx",
-			namespace:   "default",
-			containers:  nil,
-			seedSandboxes: []*agentsv1alpha1.Sandbox{templateRefSandbox()},
-			expectError: "uses a TemplateRef",
+			name:           "templateRef sandbox without -c flag",
+			sandboxName:    "ref-sbx",
+			namespace:      "default",
+			containers:     nil,
+			seedSandboxes:  []*agentsv1alpha1.Sandbox{templateRefSandbox()},
+			seedTemplates:  []*agentsv1alpha1.SandboxTemplate{refSandboxTemplate()},
+			expectCreated:  true,
+			expectContains: []string{"main", "sidecar"},
 		},
 		{
 			name:           "templateRef sandbox with explicit -c flag",
@@ -150,6 +175,7 @@ func TestRestartSandbox(t *testing.T) {
 			namespace:      "default",
 			containers:     []string{"main"},
 			seedSandboxes:  []*agentsv1alpha1.Sandbox{templateRefSandbox()},
+			seedTemplates:  []*agentsv1alpha1.SandboxTemplate{refSandboxTemplate()},
 			expectCreated:  true,
 			expectContains: []string{"main"},
 		},
@@ -161,6 +187,12 @@ func TestRestartSandbox(t *testing.T) {
 			for _, sbx := range tt.seedSandboxes {
 				_, err := agentsCS.ApiV1alpha1().Sandboxes(sbx.Namespace).Create(
 					context.TODO(), sbx, metav1.CreateOptions{},
+				)
+				assert.NoError(t, err)
+			}
+			for _, sbt := range tt.seedTemplates {
+				_, err := agentsCS.ApiV1alpha1().SandboxTemplates(sbt.Namespace).Create(
+					context.TODO(), sbt, metav1.CreateOptions{},
 				)
 				assert.NoError(t, err)
 			}
@@ -213,10 +245,11 @@ func TestRestartSandbox(t *testing.T) {
 
 func TestExtractContainerNames(t *testing.T) {
 	tests := []struct {
-		name        string
-		sandbox     *agentsv1alpha1.Sandbox
-		expected    []string
-		expectError string
+		name             string
+		sandbox          *agentsv1alpha1.Sandbox
+		sandboxTemplates []*agentsv1alpha1.SandboxTemplate
+		expected         []string
+		expectError      string
 	}{
 		{
 			name: "inline template with containers",
@@ -238,22 +271,55 @@ func TestExtractContainerNames(t *testing.T) {
 			expected: []string{"app", "sidecar"},
 		},
 		{
-			name: "templateRef returns error",
+			name: "templateRef fetches SandboxTemplate",
 			sandbox: &agentsv1alpha1.Sandbox{
-				ObjectMeta: metav1.ObjectMeta{Name: "ref-test"},
+				ObjectMeta: metav1.ObjectMeta{Name: "ref-test", Namespace: "default"},
 				Spec: agentsv1alpha1.SandboxSpec{
 					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 						TemplateRef: &agentsv1alpha1.SandboxTemplateRef{Name: "tpl"},
 					},
 				},
 			},
-			expectError: "uses a TemplateRef",
+			sandboxTemplates: []*agentsv1alpha1.SandboxTemplate{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "tpl", Namespace: "default"},
+					Spec: agentsv1alpha1.SandboxTemplateSpec{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{Name: "app"},
+									{Name: "sidecar"},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: []string{"app", "sidecar"},
+		},
+		{
+			name: "templateRef not found",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "ref-test", Namespace: "default"},
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						TemplateRef: &agentsv1alpha1.SandboxTemplateRef{Name: "missing"},
+					},
+				},
+			},
+			expectError: "failed to get SandboxTemplate",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := extractContainerNames(tt.sandbox)
+			cs := fake.NewSimpleClientset()
+			for _, sbt := range tt.sandboxTemplates {
+				_, err := cs.ApiV1alpha1().SandboxTemplates(sbt.Namespace).Create(context.TODO(), sbt, metav1.CreateOptions{})
+				assert.NoError(t, err)
+			}
+
+			result, err := extractContainerNames(context.TODO(), cs.ApiV1alpha1(), tt.sandbox)
 
 			if tt.expectError != "" {
 				assert.Error(t, err)
@@ -305,9 +371,11 @@ func TestValidateContainerNames(t *testing.T) {
 		},
 	}
 
+	cs := fake.NewSimpleClientset()
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateContainerNames(sbx, tt.containers)
+			err := validateContainerNames(context.TODO(), cs.ApiV1alpha1(), sbx, tt.containers)
 
 			if tt.expectError != "" {
 				assert.Error(t, err)

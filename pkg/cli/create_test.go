@@ -186,7 +186,7 @@ func TestDeleteActiveSandboxUpdateOps(t *testing.T) {
 			expectDeleted: 1,
 		},
 		{
-			name: "delete Completed SUO",
+			name: "skip Completed SUO",
 			existingSUOs: []*agentsv1alpha1.SandboxUpdateOps{
 				{
 					ObjectMeta: metav1.ObjectMeta{Name: "suo-completed", Namespace: "default"},
@@ -194,10 +194,10 @@ func TestDeleteActiveSandboxUpdateOps(t *testing.T) {
 					Status:     agentsv1alpha1.SandboxUpdateOpsStatus{Phase: agentsv1alpha1.SandboxUpdateOpsCompleted},
 				},
 			},
-			expectDeleted: 1,
+			expectDeleted: 0,
 		},
 		{
-			name: "delete Failed SUO",
+			name: "skip Failed SUO",
 			existingSUOs: []*agentsv1alpha1.SandboxUpdateOps{
 				{
 					ObjectMeta: metav1.ObjectMeta{Name: "suo-failed", Namespace: "default"},
@@ -205,10 +205,10 @@ func TestDeleteActiveSandboxUpdateOps(t *testing.T) {
 					Status:     agentsv1alpha1.SandboxUpdateOpsStatus{Phase: agentsv1alpha1.SandboxUpdateOpsFailed},
 				},
 			},
-			expectDeleted: 1,
+			expectDeleted: 0,
 		},
 		{
-			name: "delete multiple SUOs of different states",
+			name: "delete only active SUOs, skip Completed",
 			existingSUOs: []*agentsv1alpha1.SandboxUpdateOps{
 				{
 					ObjectMeta: metav1.ObjectMeta{Name: "suo-1", Namespace: "default"},
@@ -221,7 +221,7 @@ func TestDeleteActiveSandboxUpdateOps(t *testing.T) {
 					Status:     agentsv1alpha1.SandboxUpdateOpsStatus{Phase: agentsv1alpha1.SandboxUpdateOpsCompleted},
 				},
 			},
-			expectDeleted: 2,
+			expectDeleted: 1,
 		},
 	}
 
@@ -243,12 +243,13 @@ func TestDeleteActiveSandboxUpdateOps(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 
-				// Verify all SUOs were deleted
+				// Verify only active SUOs were deleted; Completed/Failed are preserved
 				suoList, listErr := cs.ApiV1alpha1().Sandboxupdateops("default").List(
 					context.TODO(), metav1.ListOptions{},
 				)
 				assert.NoError(t, listErr)
-				assert.Len(t, suoList.Items, 0, "all SUOs should be deleted")
+				remaining := len(tt.existingSUOs) - tt.expectDeleted
+				assert.Len(t, suoList.Items, remaining, "unexpected number of SUOs remaining")
 			}
 		})
 	}
