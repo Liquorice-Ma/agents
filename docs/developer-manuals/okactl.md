@@ -95,7 +95,6 @@ Update container images in a SandboxSet. Uses Get + Update with `retry.RetryOnCo
 
 ```bash
 okactl set image sandboxset <name> <container=image> [container=image ...] [flags]
-okactl set image sbs <name> <container=image> [container=image ...] [flags]
 ```
 
 | Flag | Short | Required | Description |

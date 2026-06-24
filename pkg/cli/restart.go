@@ -60,8 +60,9 @@ func newRestartSandboxCommand(globalOpts *GlobalOptions) *cobra.Command {
 	o := &restartOptions{global: globalOpts}
 
 	cmd := &cobra.Command{
-		Use:   "sandbox NAME [-c CONTAINER ...]",
-		Short: "Restart containers in a Sandbox by creating an OpenKruise ContainerRecreateRequest",
+		Use:     "sandbox NAME [-c CONTAINER ...]",
+		Aliases: []string{"sbx"},
+		Short:   "Restart containers in a Sandbox by creating an OpenKruise ContainerRecreateRequest",
 		Long: `Restart one or more containers in a running Sandbox.
 If no -c flags are specified, all user containers in the Sandbox will be restarted.
 This command creates an OpenKruise ContainerRecreateRequest (CRR) targeting the Sandbox's Pod.`,

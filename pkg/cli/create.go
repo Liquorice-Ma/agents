@@ -55,8 +55,9 @@ func newCreateSuoCommand(globalOpts *GlobalOptions) *cobra.Command {
 	o := &createSuoOptions{global: globalOpts}
 
 	cmd := &cobra.Command{
-		Use:   "suo -l SELECTOR CONTAINER=IMAGE [CONTAINER=IMAGE ...]",
-		Short: "Create a SandboxUpdateOps to update claimed sandbox images",
+		Use:     "suo -l SELECTOR CONTAINER=IMAGE [CONTAINER=IMAGE ...]",
+		Aliases: []string{"sandboxupdateops"},
+		Short:   "Create a SandboxUpdateOps to update claimed sandbox images",
 		Long: `Create a SandboxUpdateOps resource to batch update container images of claimed sandboxes.
 
 This command creates a SandboxUpdateOps that applies a Strategic Merge Patch to all
