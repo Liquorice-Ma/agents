@@ -80,6 +80,7 @@ spec:
                               cidr:
                                 description: CIDR is an IP address range in CIDR notation
                                   (e.g. "10.0.0.0/8").
+                                maxLength: 43
                                 minLength: 1
                                 type: string
                               fqdn:
@@ -122,6 +123,7 @@ spec:
                                       type: string
                                     description: Selector is a label selector that
                                       matches the target pods.
+                                    maxProperties: 10
                                     type: object
                                 required:
                                 - namespace
@@ -133,6 +135,7 @@ spec:
                                 must be set
                               rule: '[has(self.cidr), has(self.fqdn), has(self.service),
                                 has(self.workload)].filter(x, x).size() == 1'
+                          maxItems: 20
                           type: array
                           x-kubernetes-list-type: atomic
                         ports:
@@ -174,6 +177,7 @@ spec:
                               rule: '!has(self.endPort) || has(self.port)'
                             - message: endPort must be greater than or equal to port
                               rule: '!has(self.endPort) || self.endPort >= self.port'
+                          maxItems: 20
                           type: array
                           x-kubernetes-list-type: atomic
                         to:
@@ -187,6 +191,7 @@ spec:
                               cidr:
                                 description: CIDR is an IP address range in CIDR notation
                                   (e.g. "10.0.0.0/8").
+                                maxLength: 43
                                 minLength: 1
                                 type: string
                               fqdn:
@@ -229,6 +234,7 @@ spec:
                                       type: string
                                     description: Selector is a label selector that
                                       matches the target pods.
+                                    maxProperties: 10
                                     type: object
                                 required:
                                 - namespace
@@ -240,11 +246,13 @@ spec:
                                 must be set
                               rule: '[has(self.cidr), has(self.fqdn), has(self.service),
                                 has(self.workload)].filter(x, x).size() == 1'
+                          maxItems: 20
                           type: array
                           x-kubernetes-list-type: atomic
                       required:
                       - action
                       type: object
+                    maxItems: 50
                     type: array
                     x-kubernetes-list-type: atomic
                 type: object
@@ -279,6 +287,7 @@ spec:
                               cidr:
                                 description: CIDR is an IP address range in CIDR notation
                                   (e.g. "10.0.0.0/8").
+                                maxLength: 43
                                 minLength: 1
                                 type: string
                               fqdn:
@@ -321,6 +330,7 @@ spec:
                                       type: string
                                     description: Selector is a label selector that
                                       matches the target pods.
+                                    maxProperties: 10
                                     type: object
                                 required:
                                 - namespace
@@ -332,6 +342,7 @@ spec:
                                 must be set
                               rule: '[has(self.cidr), has(self.fqdn), has(self.service),
                                 has(self.workload)].filter(x, x).size() == 1'
+                          maxItems: 20
                           type: array
                           x-kubernetes-list-type: atomic
                         ports:
@@ -373,6 +384,7 @@ spec:
                               rule: '!has(self.endPort) || has(self.port)'
                             - message: endPort must be greater than or equal to port
                               rule: '!has(self.endPort) || self.endPort >= self.port'
+                          maxItems: 20
                           type: array
                           x-kubernetes-list-type: atomic
                         to:
@@ -386,6 +398,7 @@ spec:
                               cidr:
                                 description: CIDR is an IP address range in CIDR notation
                                   (e.g. "10.0.0.0/8").
+                                maxLength: 43
                                 minLength: 1
                                 type: string
                               fqdn:
@@ -428,6 +441,7 @@ spec:
                                       type: string
                                     description: Selector is a label selector that
                                       matches the target pods.
+                                    maxProperties: 10
                                     type: object
                                 required:
                                 - namespace
@@ -439,11 +453,13 @@ spec:
                                 must be set
                               rule: '[has(self.cidr), has(self.fqdn), has(self.service),
                                 has(self.workload)].filter(x, x).size() == 1'
+                          maxItems: 20
                           type: array
                           x-kubernetes-list-type: atomic
                       required:
                       - action
                       type: object
+                    maxItems: 50
                     type: array
                     x-kubernetes-list-type: atomic
                 type: object
@@ -573,6 +589,7 @@ spec:
                   - status
                   - type
                   type: object
+                maxItems: 20
                 type: array
                 x-kubernetes-list-map-keys:
                 - type

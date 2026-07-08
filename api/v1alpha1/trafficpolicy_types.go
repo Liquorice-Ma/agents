@@ -59,6 +59,8 @@ type TrafficPolicyWorkloadRef struct {
 	// +kubebuilder:validation:MaxLength=63
 	Namespace string `json:"namespace"`
 	// Selector is a label selector that matches the target pods.
+	//
+	// +kubebuilder:validation:MaxProperties=10
 	Selector map[string]string `json:"selector"`
 }
 
@@ -71,6 +73,7 @@ type TrafficPolicyPeer struct {
 	//
 	// +optional
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=43
 	CIDR string `json:"cidr,omitempty"`
 	// FQDN is a fully qualified domain name to match (e.g. "api.example.com").
 	//
@@ -126,17 +129,20 @@ type TrafficPolicyRule struct {
 	//
 	// +optional
 	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=20
 	From []TrafficPolicyPeer `json:"from,omitempty"`
 	// To lists destination peers. Multiple entries are ORed.
 	//
 	// +optional
 	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=20
 	To []TrafficPolicyPeer `json:"to,omitempty"`
 	// Ports restricts this rule to specific L4 protocol/port combinations.
 	// Multiple entries are ORed. If empty, the rule matches all ports.
 	//
 	// +optional
 	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=20
 	Ports []TrafficPolicyPort `json:"ports,omitempty"`
 }
 
@@ -148,6 +154,7 @@ type TrafficPolicyDirection struct {
 	//
 	// +optional
 	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=50
 	Rules []TrafficPolicyRule `json:"rules,omitempty"`
 }
 
@@ -198,6 +205,7 @@ type TrafficPolicyStatus struct {
 	// +optional
 	// +listType=map
 	// +listMapKey=type
+	// +kubebuilder:validation:MaxItems=20
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
