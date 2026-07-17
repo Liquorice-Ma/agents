@@ -32,11 +32,6 @@ import (
 	"github.com/openkruise/agents/pkg/utils"
 )
 
-// GetSandboxAddress returns the sandbox address in the format "{port}-{sandboxId}.{domain}".
-func GetSandboxAddress(sandboxID, domain string, port int32) string {
-	return fmt.Sprintf("%d-%s.%s", port, sandboxID, domain)
-}
-
 // DescribeSandbox returns details of a specific sandbox
 func (sc *Controller) DescribeSandbox(r *http.Request) (web.ApiResponse[*models.Sandbox], *web.ApiError) {
 	id := r.PathValue("sandboxID")
@@ -53,8 +48,13 @@ func (sc *Controller) DescribeSandbox(r *http.Request) (web.ApiResponse[*models.
 		return web.ApiResponse[*models.Sandbox]{}, err
 	}
 
+	domain, apiErr := sc.resolveSandboxDomain(r)
+	if apiErr != nil {
+		return web.ApiResponse[*models.Sandbox]{}, apiErr
+	}
+
 	return web.ApiResponse[*models.Sandbox]{
-		Body: sc.convertToE2BSandbox(sbx, utils.GetAccessToken(sbx)),
+		Body: sc.convertToE2BSandbox(sbx, utils.GetAccessToken(sbx), domain),
 	}, nil
 }
 
@@ -120,6 +120,7 @@ type browserHandShake struct {
 //	```
 func (sc *Controller) BrowserUse(r *http.Request) (web.ApiResponse[*browserHandShake], *web.ApiError) {
 	sandboxID := r.PathValue("sandboxID")
+
 	cdpPort, apiErr := parseCDPPort(r)
 	if apiErr != nil {
 		return web.ApiResponse[*browserHandShake]{}, apiErr
@@ -128,6 +129,11 @@ func (sc *Controller) BrowserUse(r *http.Request) (web.ApiResponse[*browserHandS
 	if apiErr != nil {
 		return web.ApiResponse[*browserHandShake]{}, apiErr
 	}
+	domain, apiErr := sc.resolveSandboxDomain(r)
+	if apiErr != nil {
+		return web.ApiResponse[*browserHandShake]{}, apiErr
+	}
+	sandboxAddr := sc.adapter.GetSandboxAddress(domain, r.URL.Path, sandboxID, int32(cdpPort)) // #nosec G115 -- port range
 
 	resp, err := sbx.Request(r.Context(), r.Method, "/json/version", cdpPort, r.Body)
 	if err != nil {
@@ -149,7 +155,7 @@ func (sc *Controller) BrowserUse(r *http.Request) (web.ApiResponse[*browserHandS
 	}
 
 	h.WebSocketDebuggerURL = browserWebSocketReplacer.ReplaceAllString(h.WebSocketDebuggerURL,
-		fmt.Sprintf("wss://%s", GetSandboxAddress(sandboxID, sc.domain, int32(cdpPort)))) // #nosec G115 -- port range
+		fmt.Sprintf("wss://%s", sandboxAddr))
 	return web.ApiResponse[*browserHandShake]{
 		Code: resp.StatusCode,
 		Body: &h,

@@ -517,7 +517,7 @@ func TestCreateSandboxWithClaim_NamingExtensionRejected(t *testing.T) {
 
 			var apiErr *web.ApiError
 			require.NotPanics(t, func() {
-				_, apiErr = ctrl.createSandboxWithClaim(context.Background(), request, user)
+				_, apiErr = ctrl.createSandboxWithClaim(context.Background(), request, user, "")
 			})
 			require.NotNil(t, apiErr)
 			assert.Equal(t, http.StatusBadRequest, apiErr.Code)
@@ -538,7 +538,7 @@ func TestCreateSandboxWithClone_InplaceUpdateRejected(t *testing.T) {
 	}
 	user := &models.CreatedTeamAPIKey{ID: uuid.New(), Name: "test-user"}
 
-	_, apiErr := ctrl.createSandboxWithClone(context.Background(), request, user)
+	_, apiErr := ctrl.createSandboxWithClone(context.Background(), request, user, "")
 	require.NotNil(t, apiErr)
 	assert.Equal(t, http.StatusBadRequest, apiErr.Code)
 	assert.Contains(t, apiErr.Message, "InplaceUpdate is not supported for clone")
@@ -630,7 +630,7 @@ func TestCreateSandboxWithClone_Naming(t *testing.T) {
 				Timeout:    600,
 				Extensions: tt.ext,
 			}
-			_, apiErr := controller.createSandboxWithClone(t.Context(), request, user)
+			_, apiErr := controller.createSandboxWithClone(t.Context(), request, user, "")
 			require.Nil(t, apiErr)
 			assert.Equal(t, tt.expectName, capturedName, "ObjectMeta.Name should reflect Extensions.Name")
 			assert.Equal(t, tt.expectGenerateName, capturedGenerateName, "ObjectMeta.GenerateName should reflect Extensions.GenerateName")
@@ -1360,7 +1360,7 @@ func TestCreateSandboxWithClone_StorageAuthHook(t *testing.T) {
 		}
 		t.Cleanup(func() { csiutils.BuildStorageAuthAnnotation = origHook })
 
-		_, apiErr := controller.createSandboxWithClone(t.Context(), baseRequest, user)
+		_, apiErr := controller.createSandboxWithClone(t.Context(), baseRequest, user, "")
 		require.NotNil(t, apiErr)
 		assert.Equal(t, http.StatusInternalServerError, apiErr.Code)
 		assert.Contains(t, apiErr.Message, "mock auth build failure")
@@ -1377,7 +1377,7 @@ func TestCreateSandboxWithClone_StorageAuthHook(t *testing.T) {
 			},
 		}
 
-		_, apiErr := controller.createSandboxWithClone(t.Context(), errRequest, user)
+		_, apiErr := controller.createSandboxWithClone(t.Context(), errRequest, user, "")
 		require.NotNil(t, apiErr)
 		assert.Equal(t, http.StatusBadRequest, apiErr.Code)
 		assert.Contains(t, apiErr.Message, "failed to get persistent volume object by name")
@@ -1394,7 +1394,7 @@ func TestCreateSandboxWithClone_StorageAuthHook(t *testing.T) {
 		// The clone will fail at the CSI mount step (no real agent-runtime sidecar),
 		// but the Modifier runs during sandbox creation — before CSI mount — so the
 		// annotation is already captured in DefaultCreateSandbox.
-		_, _ = controller.createSandboxWithClone(t.Context(), baseRequest, user)
+		_, _ = controller.createSandboxWithClone(t.Context(), baseRequest, user, "")
 
 		require.NotNil(t, capturedAnnotations, "annotations should not be nil after clone with auth hook")
 		val, exists := capturedAnnotations["security.agents.kruise.io/storage-auth"]
@@ -1409,7 +1409,7 @@ func TestCreateSandboxWithClone_StorageAuthHook(t *testing.T) {
 		t.Cleanup(func() { csiutils.BuildStorageAuthAnnotation = origHook })
 
 		// Same as above: clone fails at CSI mount, but Modifier has already run.
-		_, _ = controller.createSandboxWithClone(t.Context(), baseRequest, user)
+		_, _ = controller.createSandboxWithClone(t.Context(), baseRequest, user, "")
 
 		// The storage-auth annotation should not be present
 		if capturedAnnotations != nil {

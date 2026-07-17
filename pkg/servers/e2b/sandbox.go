@@ -36,7 +36,7 @@ import (
 )
 
 var (
-	browserWebSocketReplacer = regexp.MustCompile(`^ws://[^/]+`)
+	browserWebSocketReplacer = regexp.MustCompile(`^wss?://[^/]+`)
 	claimedSandboxStates     = []string{agentsv1alpha1.SandboxStateRunning, agentsv1alpha1.SandboxStatePaused, agentsv1alpha1.SandboxStateDead}
 	liveSandboxStates        = []string{agentsv1alpha1.SandboxStateRunning, agentsv1alpha1.SandboxStatePaused}
 )
@@ -85,11 +85,11 @@ func (sc *Controller) getNamespaceOfUser(user *models.CreatedTeamAPIKey) string 
 	return team.Name
 }
 
-func (sc *Controller) convertToE2BSandbox(sbx infra.Sandbox, accessToken string) *models.Sandbox {
+func (sc *Controller) convertToE2BSandbox(sbx infra.Sandbox, accessToken, domain string) *models.Sandbox {
 	sandbox := &models.Sandbox{
 		SandboxID:       sbx.GetSandboxID(),
 		TemplateID:      sbx.GetTemplate(),
-		Domain:          sc.domain,
+		Domain:          domain,
 		EnvdVersion:     "0.2.10",
 		EnvdAccessToken: accessToken,
 	}
@@ -160,4 +160,21 @@ func ParseTimeout(sbx infra.Sandbox) (autoPause bool, timeoutAt time.Time) {
 		return false, timeout.ShutdownTime
 	}
 	return true, timeout.PauseTime
+}
+
+// resolveSandboxDomain maps adapter domain-resolution errors to the E2B HTTP
+// boundary. Callers must invoke it before state-changing operations so that a
+// bad request cannot leave behind a partially created or resumed sandbox.
+func (sc *Controller) resolveSandboxDomain(r *http.Request) (string, *web.ApiError) {
+	if sc.domain != "" {
+		return sc.domain, nil
+	}
+	domain, err := sc.adapter.GetDomain(r.Host, r.URL.Path)
+	if err != nil {
+		return "", &web.ApiError{
+			Code:    http.StatusBadRequest,
+			Message: err.Error(),
+		}
+	}
+	return domain, nil
 }
