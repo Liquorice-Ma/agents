@@ -119,3 +119,27 @@ func TestInitTracerProvider_RestoresPropagator(t *testing.T) {
 	prop := otel.GetTextMapPropagator()
 	assert.NotNil(t, prop, "propagator should be set after InitTracerProvider")
 }
+
+func TestInitTracerProvider_EnabledWithTLS(t *testing.T) {
+	prevTP := otel.GetTracerProvider()
+	prevProp := otel.GetTextMapPropagator()
+	defer func() {
+		otel.SetTracerProvider(prevTP)
+		otel.SetTextMapPropagator(prevProp)
+	}()
+
+	shutdown, err := InitTracerProvider(context.Background(), Config{
+		Mode:          TracingModeOTel,
+		Endpoint:      "localhost:4317",
+		ServiceName:   "test-service-tls",
+		SamplingRatio: 1.0,
+		Insecure:      false, // Exercises the TLS credentials path.
+	})
+	assert.NoError(t, err, "should not error with valid TLS config")
+	assert.NotNil(t, shutdown, "should return non-nil shutdown function")
+
+	tracer := Tracer("test-tls")
+	assert.NotNil(t, tracer, "Tracer should return non-nil")
+
+	defer func() { _ = shutdown(context.Background()) }()
+}

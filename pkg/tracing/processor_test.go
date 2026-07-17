@@ -209,3 +209,14 @@ func TestFilteringSpanProcessor_ForwardsNoopFalse(t *testing.T) {
 
 	assert.Equal(t, 1, rec.len(), "span with noop=false should be forwarded")
 }
+
+func TestFilteringSpanProcessor_ShutdownAndForceFlush(t *testing.T) {
+	rec := &recordingSpanProcessor{}
+	fp := NewFilteringSpanProcessor(rec)
+
+	err := fp.ForceFlush(context.Background())
+	assert.NoError(t, err, "ForceFlush should forward to wrapped processor")
+
+	err = fp.Shutdown(context.Background())
+	assert.NoError(t, err, "Shutdown should forward to wrapped processor")
+}

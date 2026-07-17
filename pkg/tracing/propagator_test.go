@@ -302,3 +302,108 @@ func TestExtractTraceContext_InvalidTraceparent(t *testing.T) {
 		})
 	}
 }
+
+func TestAnnotationCarrier_GetSet(t *testing.T) {
+	tests := []struct {
+		name        string
+		annotations map[string]string
+		getKey      string
+		wantGet     string
+		setKey      string
+		setValue    string
+		wantSetKey  string // the key the value should be stored under after Set
+	}{
+		{
+			name:        "Get traceparent returns TraceContextAnnotationKey value",
+			annotations: map[string]string{TraceContextAnnotationKey: "00-trace-id-span-id-01"},
+			getKey:      "traceparent",
+			wantGet:     "00-trace-id-span-id-01",
+		},
+		{
+			name:        "Get non-traceparent key returns direct value",
+			annotations: map[string]string{"foo": "bar"},
+			getKey:      "foo",
+			wantGet:     "bar",
+		},
+		{
+			name:        "Get missing key returns empty string",
+			annotations: map[string]string{"foo": "bar"},
+			getKey:      "nonexistent",
+			wantGet:     "",
+		},
+		{
+			name:        "Get from nil annotations returns empty string",
+			annotations: nil,
+			getKey:      "traceparent",
+			wantGet:     "",
+		},
+		{
+			name:        "Set traceparent stores under TraceContextAnnotationKey",
+			annotations: map[string]string{},
+			setKey:      "traceparent",
+			setValue:    "00-trace-id-span-id-01",
+			wantSetKey:  TraceContextAnnotationKey,
+		},
+		{
+			name:        "Set non-traceparent stores under the same key",
+			annotations: map[string]string{},
+			setKey:      "custom-key",
+			setValue:    "custom-value",
+			wantSetKey:  "custom-key",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := &annotationCarrier{annotations: tt.annotations}
+
+			if tt.getKey != "" {
+				got := c.Get(tt.getKey)
+				assert.Equal(t, tt.wantGet, got)
+			}
+
+			if tt.setKey != "" {
+				c.Set(tt.setKey, tt.setValue)
+				assert.Equal(t, tt.setValue, c.annotations[tt.wantSetKey])
+			}
+		})
+	}
+}
+
+func TestAnnotationCarrier_Keys(t *testing.T) {
+	tests := []struct {
+		name        string
+		annotations map[string]string
+		wantLen     int
+	}{
+		{
+			name:        "empty annotations returns empty slice",
+			annotations: map[string]string{},
+			wantLen:     0,
+		},
+		{
+			name:        "nil annotations returns empty slice",
+			annotations: nil,
+			wantLen:     0,
+		},
+		{
+			name:        "single annotation returns one key",
+			annotations: map[string]string{TraceContextAnnotationKey: "value"},
+			wantLen:     1,
+		},
+		{
+			name:        "multiple annotations returns all keys",
+			annotations: map[string]string{TraceContextAnnotationKey: "value1", "other-key": "value2"},
+			wantLen:     2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := &annotationCarrier{annotations: tt.annotations}
+			keys := c.Keys()
+			assert.NotNil(t, keys, "Keys should never return nil")
+			assert.Equal(t, tt.wantLen, len(keys), "key count should match")
+		})
+	}
+}

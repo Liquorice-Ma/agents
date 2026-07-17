@@ -200,3 +200,67 @@ func TestStartChildSpan_WithNoopTracer(t *testing.T) {
 		"noop tracer should produce invalid span context")
 	_ = ctx
 }
+
+func TestTraceIDFromContext(t *testing.T) {
+	tests := []struct {
+		name string
+		ctx  context.Context
+		want string
+	}{
+		{
+			name: "no trace ID in context returns empty string",
+			ctx:  context.Background(),
+			want: "",
+		},
+		{
+			name: "trace ID in context returns the ID",
+			ctx:  context.WithValue(context.Background(), traceIDKey{}, "test-trace-id-123"),
+			want: "test-trace-id-123",
+		},
+		{
+			name: "wrong type value returns empty string",
+			ctx:  context.WithValue(context.Background(), traceIDKey{}, 12345),
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := TraceIDFromContext(tt.ctx)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestStartReconcileSpan_StoresTraceIDInContext(t *testing.T) {
+	prevTP := otel.GetTracerProvider()
+	prevProp := otel.GetTextMapPropagator()
+	defer func() {
+		otel.SetTracerProvider(prevTP)
+		otel.SetTextMapPropagator(prevProp)
+	}()
+
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
+	otel.SetTracerProvider(tp)
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+		propagation.TraceContext{},
+		propagation.Baggage{},
+	))
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+
+	box := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "trace-id-test",
+			Namespace: "default",
+			UID:       "trace-id-uid",
+		},
+	}
+
+	ctx, span := StartReconcileSpan(context.Background(), box, "sandbox-controller")
+	defer span.End()
+
+	traceID := TraceIDFromContext(ctx)
+	assert.NotEmpty(t, traceID, "trace ID should be stored in context after StartReconcileSpan")
+	assert.Equal(t, span.SpanContext().TraceID().String(), traceID,
+		"stored trace ID should match span's trace ID")
+}

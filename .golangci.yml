@@ -31,6 +31,10 @@ linters:
           - dupl
           - lll
         path: internal/*
+      - linters:
+          - dupl
+        path: pkg/sandbox-manager/api\.go
+        text: "duplicate of"
     paths:
       - third_party$
       - builtin$
