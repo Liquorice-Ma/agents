@@ -28,6 +28,8 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
+	"github.com/openkruise/agents/pkg/tracing"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 func (sc *Controller) CreateSnapshot(r *http.Request) (web.ApiResponse[*models.Snapshot], *web.ApiError) {
@@ -50,6 +52,15 @@ func (sc *Controller) CreateSnapshot(r *http.Request) (web.ApiResponse[*models.S
 			Code:    http.StatusBadRequest,
 			Message: fmt.Sprintf("Sandbox %s is not running", sandboxID),
 		}
+	}
+	ctx = tracing.WithRootSpanContext(ctx)
+	ctx, span := tracing.Tracer("sandbox-manager").Start(ctx, tracing.SpanManagerCreateSnapshot)
+	defer span.End()
+	if request.Extensions.KeepRunning != nil {
+		span.SetAttributes(attribute.Bool(tracing.AttrSnapshotKeepRunning, *request.Extensions.KeepRunning))
+	}
+	if request.Extensions.TTL != nil {
+		span.SetAttributes(attribute.String(tracing.AttrSnapshotTTL, *request.Extensions.TTL))
 	}
 	checkpointID, err := sbx.CreateCheckpoint(ctx, infra.CreateCheckpointOptions{
 		KeepRunning:        request.Extensions.KeepRunning,

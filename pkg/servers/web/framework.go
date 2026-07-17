@@ -22,12 +22,16 @@ import (
 	"fmt"
 	"net/http"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
+	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils"
 )
 
@@ -71,12 +75,30 @@ func RegisterRoute[T any](mux *http.ServeMux, method, path string, handler Handl
 		}
 		requestID := r.Header.Get("X-Request-ID")
 		if requestID == "" {
-			requestID = uuid.NewString()
+			requestID = strings.ReplaceAll(uuid.NewString(), "-", "")
 		}
 		// Derive context from request context to inherit cancellation when client disconnects
 		ctx := logs.NewContextFrom(r.Context(),
 			"requestID", requestID, "api", fmt.Sprintf("%s %s", method, path))
 		log := klog.FromContext(ctx)
+
+		// Store request ID in context so the custom IDGenerator uses it as TraceID.
+		// This enables unified trace-log correlation: TraceID = request ID.
+		ctx = tracing.WithRequestID(ctx, requestID)
+
+		// Create root span at middleware layer, wrapping the entire request lifecycle.
+		// The custom IDGenerator will produce a TraceID equal to the request ID.
+		ctx, rootSpan := tracing.Tracer("sandbox-manager").Start(ctx, fmt.Sprintf("%s %s", method, path),
+			trace.WithSpanKind(trace.SpanKindServer),
+			trace.WithAttributes(
+				attribute.String("request.id", requestID),
+			),
+		)
+		defer rootSpan.End()
+
+		// Store root span context so that InjectTraceContext uses the root span's SpanID
+		// when propagating trace context to the controller via CR annotations.
+		ctx = tracing.WithRootSpanContext(ctx)
 
 		defer func() {
 			if rec := recover(); rec != nil {

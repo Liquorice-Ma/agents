@@ -1,0 +1,200 @@
+# Grafana deployment for tracing demo dashboard.
+# Connects to Jaeger as trace data source.
+#
+# Usage:
+#   kubectl apply -k config/grafana
+#   kubectl port-forward svc/grafana -n sandbox-system 3000:3000
+#   Default credentials: admin / admin
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  namespace: sandbox-system
+  labels:
+    app.kubernetes.io/name: grafana
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Jaeger
+        type: jaeger
+        uid: jaeger
+        url: http://jaeger-query:16686
+        access: proxy
+        isDefault: true
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards-provider
+  namespace: sandbox-system
+  labels:
+    app.kubernetes.io/name: grafana
+data:
+  dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: sandbox-tracing
+        orgId: 1
+        folder: Sandbox Tracing
+        type: file
+        disableDeletion: false
+        updateIntervalSeconds: 10
+        options:
+          path: /var/lib/grafana/dashboards
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards
+  namespace: sandbox-system
+  labels:
+    app.kubernetes.io/name: grafana
+data:
+  sandbox-tracing-demo.json: |
+    {
+      "title": "Sandbox Tracing Demo",
+      "uid": "sandbox-tracing-demo",
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "10s",
+      "time": {"from": "now-1h", "to": "now"},
+      "tags": ["sandbox", "tracing"],
+      "panels": [
+        {
+          "id": 1,
+          "title": "Trace 搜索 — 全部操作",
+          "type": "table",
+          "datasource": {"type": "jaeger", "uid": "jaeger"},
+          "gridPos": {"h": 10, "w": 24, "x": 0, "y": 0},
+          "targets": [{"refId": "A", "datasource": {"type": "jaeger", "uid": "jaeger"}, "query": {"service": "sandbox-manager", "limit": 50}}],
+          "options": {"showHeader": true}
+        },
+        {
+          "id": 2,
+          "title": "创建沙箱 — Trace 列表",
+          "type": "table",
+          "datasource": {"type": "jaeger", "uid": "jaeger"},
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 10},
+          "targets": [{"refId": "A", "datasource": {"type": "jaeger", "uid": "jaeger"}, "query": {"service": "sandbox-manager", "operation": "POST", "limit": 20}}],
+          "options": {"showHeader": true}
+        },
+        {
+          "id": 3,
+          "title": "删除沙箱 — Trace 列表",
+          "type": "table",
+          "datasource": {"type": "jaeger", "uid": "jaeger"},
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 10},
+          "targets": [{"refId": "A", "datasource": {"type": "jaeger", "uid": "jaeger"}, "query": {"service": "sandbox-manager", "operation": "DELETE", "limit": 20}}],
+          "options": {"showHeader": true}
+        },
+        {
+          "id": 4,
+          "title": "休眠沙箱 — Trace 列表",
+          "type": "table",
+          "datasource": {"type": "jaeger", "uid": "jaeger"},
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 18},
+          "targets": [{"refId": "A", "datasource": {"type": "jaeger", "uid": "jaeger"}, "query": {"service": "sandbox-manager", "operation": "pause", "limit": 20}}],
+          "options": {"showHeader": true}
+        },
+        {
+          "id": 5,
+          "title": "唤醒沙箱 — Trace 列表",
+          "type": "table",
+          "datasource": {"type": "jaeger", "uid": "jaeger"},
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 18},
+          "targets": [{"refId": "A", "datasource": {"type": "jaeger", "uid": "jaeger"}, "query": {"service": "sandbox-manager", "operation": "resume", "limit": 20}}],
+          "options": {"showHeader": true}
+        },
+        {
+          "id": 6,
+          "title": "Controller Reconcile — Trace 列表",
+          "type": "table",
+          "datasource": {"type": "jaeger", "uid": "jaeger"},
+          "gridPos": {"h": 8, "w": 24, "x": 0, "y": 26},
+          "targets": [{"refId": "A", "datasource": {"type": "jaeger", "uid": "jaeger"}, "query": {"service": "sandbox-controller", "operation": "Reconcile", "limit": 50}}],
+          "options": {"showHeader": true}
+        },
+        {
+          "id": 7,
+          "title": "Jaeger UI 链接",
+          "type": "text",
+          "gridPos": {"h": 4, "w": 24, "x": 0, "y": 34},
+          "options": {"mode": "markdown", "content": "## Trace 详情查看\n\n点击上方表格中的 **Trace ID** 列，或直接访问 **Jaeger UI**：\n\n```\nkubectl port-forward svc/jaeger-query -n sandbox-system 16686:16686\n```\n\n然后打开 http://localhost:16686\n\n在 Jaeger UI 中：\n- **Service** 选择 `sandbox-manager` 或 `sandbox-controller`\n- **Operation** 选择对应的操作\n- 点击 **Find Traces** 查看瀑布图"}
+        }
+      ]
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: sandbox-system
+  labels:
+    app.kubernetes.io/name: grafana
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: grafana
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: grafana
+    spec:
+      containers:
+        - name: grafana
+          image: mirrors-ssl.aliyuncs.com/docker.io/grafana/grafana:11.3.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              value: "admin"
+            - name: GF_AUTH_ANONYMOUS_ENABLED
+              value: "true"
+            - name: GF_AUTH_ANONYMOUS_ORG_ROLE
+              value: "Admin"
+            - name: GF_INSTALL_PLUGINS
+              value: ""
+          ports:
+            - containerPort: 3000
+              name: http
+          volumeMounts:
+            - name: datasources
+              mountPath: /etc/grafana/provisioning/datasources
+            - name: dashboards-provider
+              mountPath: /etc/grafana/provisioning/dashboards
+            - name: dashboards
+              mountPath: /var/lib/grafana/dashboards
+          resources:
+            limits:
+              cpu: 500m
+              memory: 512Mi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+      volumes:
+        - name: datasources
+          configMap:
+            name: grafana-datasources
+        - name: dashboards-provider
+          configMap:
+            name: grafana-dashboards-provider
+        - name: dashboards
+          configMap:
+            name: grafana-dashboards
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: sandbox-system
+  labels:
+    app.kubernetes.io/name: grafana
+spec:
+  selector:
+    app.kubernetes.io/name: grafana
+  ports:
+    - port: 3000
+      name: http
+      targetPort: 3000

@@ -45,10 +45,13 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
+	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	"github.com/openkruise/agents/pkg/utils/runtime"
 	timeoututils "github.com/openkruise/agents/pkg/utils/timeout"
+
+	"go.opentelemetry.io/otel/attribute"
 )
 
 var DefaultCleanupTimeout = 30 * time.Second
@@ -157,6 +160,11 @@ func isKnownRejectedSandboxWrite(err error) bool {
 func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCache *sync.Map, cache infracache.Provider,
 	claimLockChannel chan struct{}, createLimiter *rate.Limiter) (claimed infra.Sandbox, metrics infra.ClaimMetrics, err error) {
 	ctx = logs.Extend(ctx, "tryClaimId", uuid.NewString()[:8])
+	ctx, span := tracing.StartChildSpan(ctx, tracing.SpanInfraClaimSandbox)
+	defer func() {
+		span.SetAttributes(attribute.Float64(tracing.AttrClaimDuration, metrics.Total.Seconds()))
+		span.End()
+	}()
 	log := klog.FromContext(ctx)
 
 	select {
@@ -367,7 +375,17 @@ func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType infra.Loc
 	if opts.CSIMount != nil {
 		log.Info("starting to perform csi mount")
 		var err error
-		metrics.CSIMount, err = runtime.ProcessCSIMounts(ctx, sbx.Sandbox, *opts.CSIMount)
+		csiCtx, csiSpan := tracing.StartChildSpan(ctx, tracing.SpanInfraProcessCSIMounts)
+		metrics.CSIMount, err = runtime.ProcessCSIMounts(csiCtx, sbx.Sandbox, *opts.CSIMount)
+		var drivers []string
+		for _, m := range opts.CSIMount.MountOptionList {
+			drivers = append(drivers, m.Driver)
+		}
+		csiSpan.SetAttributes(
+			attribute.Int(tracing.AttrCSIVolumeCount, len(opts.CSIMount.MountOptionList)),
+			attribute.StringSlice(tracing.AttrCSIVolumes, drivers),
+		)
+		csiSpan.End()
 		if err != nil {
 			log.Error(err, "failed to perform csi mount")
 			return fmt.Errorf("failed to perform csi mount: %s", err)
@@ -740,6 +758,9 @@ func createSandbox(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) 
 		return nil, fmt.Errorf("%w: %w", errSandboxCreateNotAttempted, ctx.Err())
 	default:
 	}
+	// Inject trace context into annotations before creating so the
+	// sandbox-controller can establish parent-child span relationship.
+	sbx.Annotations = tracing.InjectTraceContext(ctx, sbx.Annotations)
 	err := c.Create(ctx, sbx)
 	if err != nil {
 		return nil, err

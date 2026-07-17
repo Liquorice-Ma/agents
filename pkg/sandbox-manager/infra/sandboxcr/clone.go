@@ -37,8 +37,12 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/runtime"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 var (
@@ -77,6 +81,12 @@ func ValidateAndInitCheckpointOptions(opts infra.CreateCheckpointOptions) infra.
 }
 
 func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache infracache.Provider) (cloned infra.Sandbox, metrics infra.CloneMetrics, err error) {
+	ctx, span := tracing.Tracer("sandbox-manager").Start(ctx, tracing.SpanInfraCloneSandbox,
+		trace.WithAttributes(
+			attribute.String(tracing.AttrCloneCheckpointID, opts.CheckPointID),
+		),
+	)
+	defer span.End()
 	log := klog.FromContext(ctx).WithValues("checkpoint", opts.CheckPointID)
 	opts.LockString = chooseLockString(opts.Admission, opts.LockString)
 	admitted := false
@@ -189,7 +199,17 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 	}
 	if opts.CSIMount != nil {
 		log.Info("starting to perform csi mount")
-		metrics.CSIMount, err = runtime.ProcessCSIMounts(ctx, sbx.Sandbox, *opts.CSIMount)
+		csiCtx, csiSpan := tracing.Tracer("sandbox-manager").Start(ctx, tracing.SpanInfraProcessCSIMounts)
+		metrics.CSIMount, err = runtime.ProcessCSIMounts(csiCtx, sbx.Sandbox, *opts.CSIMount)
+		var drivers []string
+		for _, m := range opts.CSIMount.MountOptionList {
+			drivers = append(drivers, m.Driver)
+		}
+		csiSpan.SetAttributes(
+			attribute.Int(tracing.AttrCSIVolumeCount, len(opts.CSIMount.MountOptionList)),
+			attribute.StringSlice(tracing.AttrCSIVolumes, drivers),
+		)
+		csiSpan.End()
 		metrics.Total += metrics.CSIMount
 		if err != nil {
 			log.Error(err, "failed to perform csi mount")
@@ -414,6 +434,9 @@ func createSandboxTemplate(ctx context.Context, c client.Client, tmpl *v1alpha1.
 }
 
 func createCheckpoint(ctx context.Context, c client.Client, cp *v1alpha1.Checkpoint) (*v1alpha1.Checkpoint, error) {
+	// Inject trace context into annotations so the checkpoint-controller
+	// can establish parent-child span relationship.
+	cp.Annotations = tracing.InjectTraceContext(ctx, cp.Annotations)
 	if err := c.Create(ctx, cp); err != nil {
 		return nil, err
 	}
@@ -501,10 +524,17 @@ func CreateCheckpoint(ctx context.Context, sbx *v1alpha1.Sandbox, cache infracac
 
 	// Step 3: Wait for the Checkpoint to reach Succeeded.
 	// In the future, we can delete the failed Checkpoint and retry like ClaimSandbox
-	if err = cache.NewCheckpointTask(ctx, cp).Wait(opts.WaitSuccessTimeout); err != nil {
+	waitCtx, waitSpan := tracing.Tracer("sandbox-manager").Start(ctx, tracing.SpanManagerWaitForCheckpoint,
+		trace.WithAttributes(
+			attribute.String(tracing.AttrCheckpointName, cp.Name),
+		),
+	)
+	if err = cache.NewCheckpointTask(waitCtx, cp).Wait(opts.WaitSuccessTimeout); err != nil {
+		waitSpan.End()
 		log.Error(err, "failed to wait checkpoint ready")
 		return "", fmt.Errorf("failed to wait checkpoint ready: %w", err)
 	}
+	waitSpan.End()
 	fresh := &v1alpha1.Checkpoint{}
 	if err = cache.GetClient().Get(ctx, client.ObjectKeyFromObject(cp), fresh); err != nil {
 		log.Error(err, "failed to refresh checkpoint after wait")

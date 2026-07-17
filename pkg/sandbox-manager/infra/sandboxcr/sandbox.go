@@ -36,11 +36,15 @@ import (
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	"github.com/openkruise/agents/pkg/utils/proxyutils"
 	"github.com/openkruise/agents/pkg/utils/runtime"
 	"github.com/openkruise/agents/pkg/utils/timeout"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // ModifierFunc mutates the sandbox and decides whether retryUpdate should persist it.
@@ -144,6 +148,9 @@ func (s *Sandbox) retryUpdate(ctx context.Context, modifier ModifierFunc) (bool,
 			updated = false
 			return nil
 		}
+		// Inject trace context into annotations before updating so the
+		// sandbox-controller can establish parent-child span relationship.
+		copied.Annotations = tracing.InjectTraceContext(ctx, copied.Annotations)
 		if err = s.Cache.GetClient().Update(ctx, copied); err != nil {
 			return err
 		}
@@ -177,6 +184,23 @@ func (s *Sandbox) Kill(ctx context.Context) error {
 	if s.GetDeletionTimestamp() != nil {
 		return nil
 	}
+
+	ctx, span := tracing.Tracer("sandbox-manager").Start(ctx, tracing.SpanInfraKill,
+		trace.WithAttributes(
+			attribute.String(tracing.AttrSandboxName, s.Name),
+		),
+	)
+	defer span.End()
+
+	// Inject trace context before deletion so the controller's terminating
+	// Reconcile can establish a parent-child trace relationship. Patch failure
+	// is non-fatal: trace loss is acceptable, deletion must proceed.
+	patch := client.MergeFrom(s.Sandbox.DeepCopy())
+	s.Sandbox.Annotations = tracing.InjectTraceContext(ctx, s.Sandbox.Annotations)
+	if err := s.Cache.GetClient().Patch(ctx, s.Sandbox, patch); err != nil {
+		klog.FromContext(ctx).Error(err, "failed to inject trace context before deletion")
+	}
+
 	return DefaultDeleteSandbox(ctx, s.Sandbox, s.Cache.GetClient())
 }
 
@@ -186,6 +210,8 @@ func (s *Sandbox) TriggerRecycle(ctx context.Context) error {
 		s.Sandbox.Annotations = make(map[string]string, 1)
 	}
 	s.Sandbox.Annotations[agentsv1alpha1.AnnotationCleanup] = agentsv1alpha1.True
+	// Inject trace context so the controller's recycle Reconcile is linked.
+	s.Sandbox.Annotations = tracing.InjectTraceContext(ctx, s.Sandbox.Annotations)
 	return s.Cache.GetClient().Patch(ctx, s.Sandbox, patch)
 }
 
@@ -335,6 +361,8 @@ func (s *Sandbox) Request(ctx context.Context, method, path string, port int, bo
 }
 
 func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) error {
+	ctx, span := tracing.Tracer("sandbox-manager").Start(ctx, tracing.SpanInfraPause)
+	defer span.End()
 	log := klog.FromContext(ctx)
 	if err := s.refreshFromAPIReader(ctx); err != nil {
 		return err
@@ -397,6 +425,8 @@ const postResumeOperationTimeout = 30 * time.Second
 const resumeWaitMaxTimeout = 10 * time.Minute
 
 func (s *Sandbox) Resume(ctx context.Context, opts infra.ResumeOptions) error {
+	ctx, span := tracing.Tracer("sandbox-manager").Start(ctx, tracing.SpanInfraResume)
+	defer span.End()
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox))
 
 	if err := s.refreshFromAPIReader(ctx); err != nil {
@@ -502,6 +532,12 @@ func (s *Sandbox) CSIMount(ctx context.Context, driver string, request string) e
 }
 
 func (s *Sandbox) CreateCheckpoint(ctx context.Context, opts infra.CreateCheckpointOptions) (string, error) {
+	ctx, span := tracing.Tracer("sandbox-manager").Start(ctx, tracing.SpanInfraCreateCheckpoint,
+		trace.WithAttributes(
+			attribute.Float64(tracing.AttrCheckpointDuration, opts.WaitSuccessTimeout.Seconds()),
+		),
+	)
+	defer span.End()
 	log := klog.FromContext(ctx)
 	opts = ValidateAndInitCheckpointOptions(opts)
 	log.Info("create checkpoint options", "options", opts)

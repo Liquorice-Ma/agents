@@ -3047,7 +3047,7 @@ func Test_isContainersConsistent(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := isContainersConsistent(tt.pod, box)
+			result := isContainersConsistent(context.Background(), tt.pod, box)
 			if result != tt.expected {
 				t.Errorf("isContainersConsistent() = %v, expected %v", result, tt.expected)
 			}

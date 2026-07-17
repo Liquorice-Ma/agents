@@ -37,6 +37,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
+	"github.com/openkruise/agents/pkg/tracing"
 )
 
 // Controller handles sandbox-related operations
@@ -94,7 +95,7 @@ func NewController(domain, sysNs, peerSelector, sandboxNamespace, sandboxLabelSe
 
 	sc.server = &http.Server{
 		Addr:              fmt.Sprintf(":%d", port),
-		Handler:           sc.mux,
+		Handler:           tracing.HTTPMiddleware(sc.mux, "sandbox-manager"),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -182,9 +183,13 @@ func (sc *Controller) Run() (context.Context, error) {
 	// Channel to listen for interrupt signal
 	sc.stop = make(chan os.Signal, 1)
 	signal.Notify(sc.stop, syscall.SIGINT, syscall.SIGTERM)
-	if err := sc.manager.Run(ctx); err != nil {
-		klog.Fatalf("Sandbox manager failed to start: %v", err)
-	}
+	// Start sandbox manager in a goroutine — Run() blocks on cache.Run(),
+	// so it must not be called synchronously before the HTTP server starts.
+	go func() {
+		if err := sc.manager.Run(ctx); err != nil {
+			klog.Fatalf("Sandbox manager failed to start: %v", err)
+		}
+	}()
 
 	// Run HTTP server in a goroutine
 	go func() {
