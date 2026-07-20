@@ -160,6 +160,9 @@ func isKnownRejectedSandboxWrite(err error) bool {
 func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCache *sync.Map, cache infracache.Provider,
 	claimLockChannel chan struct{}, createLimiter *rate.Limiter) (claimed infra.Sandbox, metrics infra.ClaimMetrics, err error) {
 	ctx = logs.Extend(ctx, "tryClaimId", uuid.NewString()[:8])
+	// Trace the whole claim attempt as a child span. Use a deferred closure
+	// (instead of defer span.End()) so the total claim duration, which is only
+	// known at return time, can be attached before ending the span.
 	ctx, span := tracing.StartChildSpan(ctx, tracing.SpanInfraClaimSandbox)
 	defer func() {
 		span.SetAttributes(attribute.Float64(tracing.AttrClaimDuration, metrics.Total.Seconds()))
@@ -375,6 +378,9 @@ func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType infra.Loc
 	if opts.CSIMount != nil {
 		log.Info("starting to perform csi mount")
 		var err error
+		// Trace the CSI mount as a child span; volume count and driver list
+		// are attached afterwards, and End() is called explicitly so the span
+		// only covers the mount itself.
 		csiCtx, csiSpan := tracing.StartChildSpan(ctx, tracing.SpanInfraProcessCSIMounts)
 		metrics.CSIMount, err = runtime.ProcessCSIMounts(csiCtx, sbx.Sandbox, *opts.CSIMount)
 		var drivers []string

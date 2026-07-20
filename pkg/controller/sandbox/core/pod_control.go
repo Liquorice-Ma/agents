@@ -128,6 +128,8 @@ func (c *PodControl) CreatePod(ctx context.Context, args CreatePodArgs) (*corev1
 	}
 
 	ScaleExpectation.ExpectScale(GetControllerKey(box), expectations.Create, box.Name)
+	// Trace the pod creation as a child span; the pod name attribute is set
+	// after Create since generateName is only resolved by the API server.
 	ctx, span := tracing.StartChildSpan(ctx, tracing.SpanControllerCreatePod)
 	defer span.End()
 	err = c.Create(ctx, pod)

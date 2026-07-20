@@ -14,6 +14,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// This file benchmarks the overhead that the create-then-filter tracing
+// architecture adds to controller Reconcile loops, especially the common
+// no-op case where the span is created and then dropped. Benchmarks are not
+// executed by regular `go test`; run them with:
+//
+//	go test -bench=. -benchmem ./pkg/tracing/
+
 package tracing
 
 import (

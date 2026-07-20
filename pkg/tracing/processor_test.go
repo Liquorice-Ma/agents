@@ -220,3 +220,67 @@ func TestFilteringSpanProcessor_ShutdownAndForceFlush(t *testing.T) {
 	err = fp.Shutdown(context.Background())
 	assert.NoError(t, err, "Shutdown should forward to wrapped processor")
 }
+
+func TestWriteFlag(t *testing.T) {
+	tests := []struct {
+		name      string
+		setup     func(ctx context.Context) context.Context
+		markWrite bool
+		wantWrite bool
+	}{
+		{
+			name:      "no write flag in context returns false",
+			setup:     func(ctx context.Context) context.Context { return ctx },
+			markWrite: false,
+			wantWrite: false,
+		},
+		{
+			name:      "write flag present but not marked returns false",
+			setup:     func(ctx context.Context) context.Context { return WithWriteFlag(ctx) },
+			markWrite: false,
+			wantWrite: false,
+		},
+		{
+			name:      "write flag present and marked returns true",
+			setup:     func(ctx context.Context) context.Context { return WithWriteFlag(ctx) },
+			markWrite: true,
+			wantWrite: true,
+		},
+		{
+			name:      "MarkWrite without write flag is a no-op",
+			setup:     func(ctx context.Context) context.Context { return ctx },
+			markWrite: true,
+			wantWrite: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := tt.setup(context.Background())
+			if tt.markWrite {
+				MarkWrite(ctx)
+			}
+			assert.Equal(t, tt.wantWrite, HasWrite(ctx))
+		})
+	}
+}
+
+func TestMarkWrite_Idempotent(t *testing.T) {
+	ctx := WithWriteFlag(context.Background())
+	assert.False(t, HasWrite(ctx), "should be false before MarkWrite")
+
+	MarkWrite(ctx)
+	assert.True(t, HasWrite(ctx), "should be true after first MarkWrite")
+
+	MarkWrite(ctx)
+	assert.True(t, HasWrite(ctx), "should remain true after second MarkWrite")
+}
+
+func TestWithWriteFlag_IndependentFlags(t *testing.T) {
+	ctx1 := WithWriteFlag(context.Background())
+	ctx2 := WithWriteFlag(context.Background())
+
+	MarkWrite(ctx1)
+	assert.True(t, HasWrite(ctx1), "ctx1 should be marked")
+	assert.False(t, HasWrite(ctx2), "ctx2 should not be affected by marking ctx1")
+}

@@ -71,10 +71,12 @@ func handleInPlaceUpdateCommon(
 
 	// Check if revision is consistent
 	if pod.Labels[agentsv1alpha1.PodLabelTemplateHash] == newStatus.UpdateRevision {
-		// If InplaceUpdate condition is already Succeeded, the inplace update has
-		// already been completed in a previous Reconcile. Return done=false to avoid
-		// marking the Reconcile as having performed a write operation, which would
-		// prevent the Reconcile span from being filtered as no-op.
+		// Idempotent early exit: if the InplaceUpdate condition is already
+		// Succeeded, the inplace update was completed in a previous Reconcile.
+		// Skip re-evaluating completion and re-setting the condition, and
+		// return done=false so this no-op Reconcile is not marked as a write
+		// operation (see MarkWrite in the caller), keeping its span eligible
+		// for no-op filtering.
 		existingCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
 		if existingCond != nil && existingCond.Status == metav1.ConditionTrue &&
 			existingCond.Reason == agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded {

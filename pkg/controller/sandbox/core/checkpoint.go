@@ -131,6 +131,8 @@ func (c *CheckpointControl) AssumePodCheckpointed(ctx context.Context, pod *core
 	default:
 		cond.Message = fmt.Sprintf("Waiting for checkpoint %s", cp.Name)
 		utils.SetSandboxCondition(newStatus, *cond)
+		// Use klog.FromContext to automatically include traceID in logs,
+		// enabling trace-log correlation during checkpoint polling.
 		klog.FromContext(ctx).Info("Waiting for checkpoint to complete", "sandbox", klog.KObj(box), "checkpoint", cp.Name, "phase", cp.Status.Phase)
 		return true
 	}

@@ -82,7 +82,7 @@ spec:
           # OpenTelemetry tracing (uncomment to enable)
           # - --tracing-mode=otel
           # - --tracing-endpoint=otel-collector:4317
-          # - --tracing-insecure=true
+          # - --tracing-insecure=false
         image: controller:latest
         imagePullPolicy: IfNotPresent
         name: manager

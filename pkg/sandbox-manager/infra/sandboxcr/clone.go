@@ -199,6 +199,9 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 	}
 	if opts.CSIMount != nil {
 		log.Info("starting to perform csi mount")
+		// Trace the CSI mount as a child span; volume count and driver list
+		// are attached afterwards, and End() is called explicitly so the span
+		// only covers the mount itself.
 		csiCtx, csiSpan := tracing.Tracer("sandbox-manager").Start(ctx, tracing.SpanInfraProcessCSIMounts)
 		metrics.CSIMount, err = runtime.ProcessCSIMounts(csiCtx, sbx.Sandbox, *opts.CSIMount)
 		var drivers []string
@@ -524,6 +527,8 @@ func CreateCheckpoint(ctx context.Context, sbx *v1alpha1.Sandbox, cache infracac
 
 	// Step 3: Wait for the Checkpoint to reach Succeeded.
 	// In the future, we can delete the failed Checkpoint and retry like ClaimSandbox
+	// Trace the wait phase as a dedicated span with explicit End() so it
+	// only covers the time spent waiting for the Checkpoint to succeed.
 	waitCtx, waitSpan := tracing.Tracer("sandbox-manager").Start(ctx, tracing.SpanManagerWaitForCheckpoint,
 		trace.WithAttributes(
 			attribute.String(tracing.AttrCheckpointName, cp.Name),

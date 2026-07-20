@@ -138,10 +138,12 @@ func main() {
 	var tracingEndpoint string
 	var tracingInsecure bool
 	var tracingSamplingRatio float64
-	flag.StringVar(&tracingMode, "tracing-mode", "otel", "Tracing mode: otel, none")
+	var tracingFilePath string
+	flag.StringVar(&tracingMode, "tracing-mode", "none", "Tracing mode: otel, std, file, none")
 	flag.StringVar(&tracingEndpoint, "tracing-endpoint", tracing.DefaultEndpoint, "OTLP gRPC endpoint for tracing export")
 	flag.Float64Var(&tracingSamplingRatio, "tracing-sampling-ratio", 1.0, "Trace sampling ratio (0.0 to 1.0)")
-	flag.BoolVar(&tracingInsecure, "tracing-insecure", true, "Use insecure gRPC for tracing export (dev environment)")
+	flag.BoolVar(&tracingInsecure, "tracing-insecure", false, "Use insecure gRPC for tracing export (dev environment)")
+	flag.StringVar(&tracingFilePath, "tracing-file", "", "Output file path for tracing export (file mode)")
 
 	opts := zap.Options{
 		Development: true,
@@ -266,6 +268,7 @@ func main() {
 	tracingShutdown, err := tracing.InitTracerProvider(context.Background(), tracing.Config{
 		Mode:          tracing.TracingMode(tracingMode),
 		Endpoint:      tracingEndpoint,
+		FilePath:      tracingFilePath,
 		ServiceName:   "sandbox-controller",
 		SamplingRatio: tracingSamplingRatio,
 		Insecure:      tracingInsecure,

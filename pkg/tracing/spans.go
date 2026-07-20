@@ -50,6 +50,7 @@ const (
 	SpanControllerDeletePod               = "controller.DeletePod"
 	SpanControllerPatchPod                = "controller.PatchPod"
 	SpanControllerCheckpoint              = "controller.Checkpoint"
+	SpanControllerProcessCSIMounts        = "controller.ProcessCSIMounts"
 	SpanControllerUpdateStatus            = "controller.updateSandboxStatus"
 )
 
@@ -93,9 +94,10 @@ const (
 // Reconcile as having written (see MarkWrite), so the enclosing Reconcile and
 // EnsureSandbox* Spans are retained instead of being filtered as no-op.
 var writeSpanNames = map[string]bool{
-	SpanControllerCreatePod:    true,
-	SpanControllerDeletePod:    true,
-	SpanControllerPatchPod:     true,
-	SpanControllerCheckpoint:   true,
-	SpanControllerUpdateStatus: true,
+	SpanControllerCreatePod:        true,
+	SpanControllerDeletePod:        true,
+	SpanControllerPatchPod:         true,
+	SpanControllerCheckpoint:       true,
+	SpanControllerProcessCSIMounts: true,
+	SpanControllerUpdateStatus:     true,
 }

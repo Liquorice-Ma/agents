@@ -18,6 +18,7 @@ package tracing
 
 import (
 	"context"
+	"sync/atomic"
 
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
@@ -62,4 +63,41 @@ func (p *filteringSpanProcessor) Shutdown(ctx context.Context) error {
 // ForceFlush forwards to the wrapped processor.
 func (p *filteringSpanProcessor) ForceFlush(ctx context.Context) error {
 	return p.next.ForceFlush(ctx)
+}
+
+// writeFlagKey is the context key for the per-Reconcile write flag.
+type writeFlagKey struct{}
+
+// writeFlag tracks whether any real write operation (e.g. CreatePod, DeletePod,
+// status Patch, finalizer removal) occurred during a single Reconcile iteration.
+// It is shared across the whole Reconcile call tree via context so that the
+// Reconcile Span (and its EnsureSandbox* child Spans) can be marked as no-op and
+// dropped by FilteringSpanProcessor when nothing was actually written.
+type writeFlag struct {
+	written atomic.Bool
+}
+
+// WithWriteFlag returns a context carrying a fresh write flag. It must be called
+// once at the start of each Reconcile iteration (in StartReconcileSpan) so that
+// downstream write operations can mark it via MarkWrite.
+func WithWriteFlag(ctx context.Context) context.Context {
+	return context.WithValue(ctx, writeFlagKey{}, &writeFlag{})
+}
+
+// MarkWrite records that a real write operation happened in the current Reconcile.
+// It is a no-op if the context carries no write flag (e.g. tracing disabled or
+// called outside a Reconcile). Safe for concurrent use.
+func MarkWrite(ctx context.Context) {
+	if f, ok := ctx.Value(writeFlagKey{}).(*writeFlag); ok {
+		f.written.Store(true)
+	}
+}
+
+// HasWrite reports whether MarkWrite was called for the current Reconcile.
+// Returns false if the context carries no write flag.
+func HasWrite(ctx context.Context) bool {
+	if f, ok := ctx.Value(writeFlagKey{}).(*writeFlag); ok {
+		return f.written.Load()
+	}
+	return false
 }
