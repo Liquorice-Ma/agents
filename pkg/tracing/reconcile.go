@@ -98,7 +98,7 @@ func StartChildSpan(ctx context.Context, spanName string, attrs ...attribute.Key
 		MarkWrite(ctx)
 	}
 
-	tracer := Tracer("sandbox-controller")
+	tracer := Tracer("sandbox")
 	opts := []trace.SpanStartOption{
 		trace.WithSpanKind(trace.SpanKindInternal),
 	}

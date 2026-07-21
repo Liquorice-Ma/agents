@@ -73,8 +73,8 @@ func RegisterRoute[T any](mux *http.ServeMux, method, path string, handler Handl
 				writeJson(ctx, w, code, defaultCode, body, headers, requestID)
 			}
 		}
-		requestID := r.Header.Get("X-Request-ID")
-		if requestID == "" {
+		requestID := strings.ReplaceAll(r.Header.Get("X-Request-ID"), "-", "")
+		if len(requestID) != 32 {
 			requestID = strings.ReplaceAll(uuid.NewString(), "-", "")
 		}
 		// Derive context from request context to inherit cancellation when client disconnects

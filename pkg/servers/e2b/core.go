@@ -37,7 +37,6 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
-	"github.com/openkruise/agents/pkg/tracing"
 )
 
 // Controller handles sandbox-related operations
@@ -95,7 +94,7 @@ func NewController(domain, sysNs, peerSelector, sandboxNamespace, sandboxLabelSe
 
 	sc.server = &http.Server{
 		Addr:              fmt.Sprintf(":%d", port),
-		Handler:           tracing.HTTPMiddleware(sc.mux, "sandbox-manager"),
+		Handler:           sc.mux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
