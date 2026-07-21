@@ -49,6 +49,7 @@ const (
 	SpanControllerCreatePod               = "controller.CreatePod"
 	SpanControllerDeletePod               = "controller.DeletePod"
 	SpanControllerPatchPod                = "controller.PatchPod"
+	SpanControllerRemoveFinalizer         = "controller.RemoveFinalizer"
 	SpanControllerCheckpoint              = "controller.Checkpoint"
 	SpanControllerProcessCSIMounts        = "controller.ProcessCSIMounts"
 	SpanControllerUpdateStatus            = "controller.updateSandboxStatus"
@@ -90,13 +91,14 @@ const (
 )
 
 // writeSpanNames is the set of child Span names that represent a real write
-// operation. When StartChildSpan creates any of these, it marks the current
+// operation. When StartSpan creates any of these, it marks the current
 // Reconcile as having written (see MarkWrite), so the enclosing Reconcile and
 // EnsureSandbox* Spans are retained instead of being filtered as no-op.
 var writeSpanNames = map[string]bool{
 	SpanControllerCreatePod:        true,
 	SpanControllerDeletePod:        true,
 	SpanControllerPatchPod:         true,
+	SpanControllerRemoveFinalizer:  true,
 	SpanControllerCheckpoint:       true,
 	SpanControllerProcessCSIMounts: true,
 	SpanControllerUpdateStatus:     true,

@@ -252,10 +252,10 @@ func (r *commonControl) EnsureSandboxPaused(ctx context.Context, args EnsureFunc
 		return nil
 	}
 
-	ctx, deleteSpan := tracing.StartChildSpan(ctx, tracing.SpanControllerDeletePod,
+	ctx, deleteSpan := tracing.StartSpan(ctx, tracing.SpanControllerDeletePod,
 		attribute.String(tracing.AttrPodName, pod.Name))
 	err := client.IgnoreNotFound(r.Delete(ctx, pod, &client.DeleteOptions{GracePeriodSeconds: ptr.To(int64(5))}))
-	deleteSpan.End()
+	tracing.EndSpan(ctx, deleteSpan, err)
 	if err != nil {
 		klog.FromContext(ctx).Error(err, "Delete pod failed", "sandbox", klog.KObj(box))
 		return err
@@ -371,11 +371,9 @@ func (r *commonControl) EnsureSandboxTerminated(ctx context.Context, args Ensure
 	pod, box, _ := args.Pod, args.Box, args.NewStatus
 	var err error
 	if pod == nil {
-		// RemoveFinalizer is a write operation that is not wrapped in a span,
-		// so mark the Reconcile write flag explicitly to prevent the enclosing
-		// Reconcile span from being filtered as no-op.
-		tracing.MarkWrite(ctx)
+		ctx, span := tracing.StartSpan(ctx, tracing.SpanControllerRemoveFinalizer)
 		_, err = utils.PatchFinalizer(ctx, r.Client, box, utils.RemoveFinalizerOpType, SandboxFinalizer)
+		tracing.EndSpan(ctx, span, err)
 		if err != nil {
 			klog.FromContext(ctx).Error(err, "update sandbox finalizer failed", "sandbox", klog.KObj(box))
 			return err
@@ -387,10 +385,10 @@ func (r *commonControl) EnsureSandboxTerminated(ctx context.Context, args Ensure
 		return nil
 	}
 
-	ctx, deleteSpan := tracing.StartChildSpan(ctx, tracing.SpanControllerDeletePod,
+	ctx, deleteSpan := tracing.StartSpan(ctx, tracing.SpanControllerDeletePod,
 		attribute.String(tracing.AttrPodName, pod.Name))
 	err = client.IgnoreNotFound(r.Delete(ctx, pod))
-	deleteSpan.End()
+	tracing.EndSpan(ctx, deleteSpan, err)
 	if err != nil {
 		klog.FromContext(ctx).Error(err, "delete pod failed", "sandbox", klog.KObj(box))
 		return err

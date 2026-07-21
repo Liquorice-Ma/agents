@@ -161,12 +161,12 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 	claimLockChannel chan struct{}, createLimiter *rate.Limiter) (claimed infra.Sandbox, metrics infra.ClaimMetrics, err error) {
 	ctx = logs.Extend(ctx, "tryClaimId", uuid.NewString()[:8])
 	// Trace the whole claim attempt as a child span. Use a deferred closure
-	// (instead of defer span.End()) so the total claim duration, which is only
-	// known at return time, can be attached before ending the span.
-	ctx, span := tracing.StartChildSpan(ctx, tracing.SpanInfraClaimSandbox)
+	// (instead of defer span.End()) so the total claim duration and the final
+	// error, which are only known at return time, can be attached before ending.
+	ctx, span := tracing.StartSpan(ctx, tracing.SpanInfraClaimSandbox)
 	defer func() {
 		span.SetAttributes(attribute.Float64(tracing.AttrClaimDuration, metrics.Total.Seconds()))
-		span.End()
+		tracing.EndSpan(ctx, span, err)
 	}()
 	log := klog.FromContext(ctx)
 
@@ -381,7 +381,7 @@ func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType infra.Loc
 		// Trace the CSI mount as a child span; volume count and driver list
 		// are attached afterwards, and End() is called explicitly so the span
 		// only covers the mount itself.
-		csiCtx, csiSpan := tracing.StartChildSpan(ctx, tracing.SpanInfraProcessCSIMounts)
+		csiCtx, csiSpan := tracing.StartSpan(ctx, tracing.SpanInfraProcessCSIMounts)
 		metrics.CSIMount, err = runtime.ProcessCSIMounts(csiCtx, sbx.Sandbox, *opts.CSIMount)
 		var drivers []string
 		for _, m := range opts.CSIMount.MountOptionList {
@@ -391,7 +391,7 @@ func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType infra.Loc
 			attribute.Int(tracing.AttrCSIVolumeCount, len(opts.CSIMount.MountOptionList)),
 			attribute.StringSlice(tracing.AttrCSIVolumes, drivers),
 		)
-		csiSpan.End()
+		tracing.EndSpan(csiCtx, csiSpan, err)
 		if err != nil {
 			log.Error(err, "failed to perform csi mount")
 			return fmt.Errorf("failed to perform csi mount: %s", err)

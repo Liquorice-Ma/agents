@@ -75,7 +75,7 @@ func BenchmarkReconcileSpan_NoWrite(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		ctx, span := StartReconcileSpan(context.Background(), box, "sandbox-controller")
 		// No MarkWrite — simulates an empty Reconcile with no write operations.
-		EndSpanWithWriteCheck(ctx, span)
+		EndSpan(ctx, span, nil)
 	}
 }
 
@@ -96,12 +96,12 @@ func BenchmarkReconcileSpan_WithWrite(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		ctx, span := StartReconcileSpan(context.Background(), box, "sandbox-controller")
 		MarkWrite(ctx)
-		EndSpanWithWriteCheck(ctx, span)
+		EndSpan(ctx, span, nil)
 	}
 }
 
 // BenchmarkReconcileSpan_WithChildWrite measures the full path: Reconcile span
-// + a write-operation child span (e.g. CreatePod) + EndSpanWithWriteCheck.
+// + a write-operation child span (e.g. CreatePod) + EndSpan.
 func BenchmarkReconcileSpan_WithChildWrite(b *testing.B) {
 	cleanup := setupBenchTracer(b)
 	defer cleanup()
@@ -116,21 +116,21 @@ func BenchmarkReconcileSpan_WithChildWrite(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		ctx, reconcileSpan := StartReconcileSpan(context.Background(), box, "sandbox-controller")
-		_, childSpan := StartChildSpan(ctx, SpanControllerCreatePod)
-		childSpan.End()
-		EndSpanWithWriteCheck(ctx, reconcileSpan)
+		ctx, childSpan := StartSpan(ctx, SpanControllerCreatePod)
+		EndSpan(ctx, childSpan, nil)
+		EndSpan(ctx, reconcileSpan, nil)
 	}
 }
 
-// BenchmarkWriteFlag measures the raw write-flag operations (MarkWrite + HasWrite)
+// BenchmarkWriteFlag measures the raw write-flag operations (MarkWrite + hasWrite)
 // without any span overhead, to isolate the atomic operation cost.
 func BenchmarkWriteFlag(b *testing.B) {
-	ctx := WithWriteFlag(context.Background())
+	ctx := withWriteFlag(context.Background())
 
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		MarkWrite(ctx)
-		_ = HasWrite(ctx)
+		_ = hasWrite(ctx)
 	}
 }

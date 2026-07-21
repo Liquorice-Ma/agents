@@ -77,25 +77,29 @@ type writeFlag struct {
 	written atomic.Bool
 }
 
-// WithWriteFlag returns a context carrying a fresh write flag. It must be called
+// withWriteFlag returns a context carrying a fresh write flag. It must be called
 // once at the start of each Reconcile iteration (in StartReconcileSpan) so that
 // downstream write operations can mark it via MarkWrite.
-func WithWriteFlag(ctx context.Context) context.Context {
+func withWriteFlag(ctx context.Context) context.Context {
 	return context.WithValue(ctx, writeFlagKey{}, &writeFlag{})
 }
 
 // MarkWrite records that a real write operation happened in the current Reconcile.
-// It is a no-op if the context carries no write flag (e.g. tracing disabled or
-// called outside a Reconcile). Safe for concurrent use.
+// Write-operation Spans created via StartSpan (see writeSpanNames) call it
+// automatically; call it directly only when a write happens inside a helper whose
+// individual operations are not wrapped in their own Spans (e.g. a deep function
+// reporting success via a done bool). It is a no-op if the context carries no
+// write flag (e.g. tracing disabled or called outside a Reconcile).
+// Safe for concurrent use.
 func MarkWrite(ctx context.Context) {
 	if f, ok := ctx.Value(writeFlagKey{}).(*writeFlag); ok {
 		f.written.Store(true)
 	}
 }
 
-// HasWrite reports whether MarkWrite was called for the current Reconcile.
+// hasWrite reports whether MarkWrite was called for the current Reconcile.
 // Returns false if the context carries no write flag.
-func HasWrite(ctx context.Context) bool {
+func hasWrite(ctx context.Context) bool {
 	if f, ok := ctx.Value(writeFlagKey{}).(*writeFlag); ok {
 		return f.written.Load()
 	}

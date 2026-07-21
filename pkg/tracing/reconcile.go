@@ -20,6 +20,7 @@ import (
 	"context"
 
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -47,6 +48,9 @@ func TraceIDFromContext(ctx context.Context) string {
 // If no trace-context annotation exists (e.g., kubectl-created sandbox), the Span
 // starts a new root trace — still useful for manual search via sandbox UID attribute.
 //
+// This function is for controller Reconcile entry points only. To instrument an
+// operation inside a Reconcile, use StartSpan + EndSpan instead.
+//
 // IMPORTANT: The caller must invoke this AFTER all early-return paths that indicate
 // "no work to do" (e.g., Sandbox not found, terminal state, expectation unsatisfied).
 // This avoids creating noise Spans for no-op Reconciles.
@@ -57,9 +61,8 @@ func StartReconcileSpan(ctx context.Context, obj client.Object, controllerName s
 
 	// Attach a fresh write flag so downstream write operations can mark this
 	// Reconcile as having performed real work. Reconcile and EnsureSandbox*
-	// Spans with no write are dropped by FilteringSpanProcessor (see
-	// EndSpanWithWriteCheck).
-	ctx = WithWriteFlag(ctx)
+	// Spans with no write are dropped by FilteringSpanProcessor (see EndSpan).
+	ctx = withWriteFlag(ctx)
 
 	tracer := Tracer(controllerName)
 	attrs := []attribute.KeyValue{
@@ -79,13 +82,31 @@ func StartReconcileSpan(ctx context.Context, obj client.Object, controllerName s
 	return ctx, span
 }
 
-// StartChildSpan creates a child Span within a Reconcile for specific IO operations
-// (e.g., CreatePod, UpdateStatus, Checkpoint).
+// StartSpan starts a new child Span for a specific operation (e.g. CreatePod,
+// DeletePod) within the trace carried by ctx. Together with EndSpan it is the
+// only pair of functions needed to instrument a piece of code:
 //
-// If the context does not carry a valid parent span (e.g., tracing is disabled or
-// the Reconcile Span was a noop), StartChildSpan returns a noop span to avoid
-// creating orphan root spans that would pollute trace data.
-func StartChildSpan(ctx context.Context, spanName string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
+//	ctx, span := tracing.StartSpan(ctx, tracing.SpanControllerCreatePod,
+//	    attribute.String(tracing.AttrPodName, pod.Name))
+//	err := c.Create(ctx, pod)
+//	tracing.EndSpan(ctx, span, err)
+//
+// Parameters:
+//   - ctx: context carrying the parent Span, e.g. the one returned by
+//     StartReconcileSpan or an enclosing StartSpan. If it carries no valid
+//     parent Span (tracing disabled, or called outside a traced entry point),
+//     a no-op Span is returned so instrumentation stays zero-cost and never
+//     creates orphan root Spans.
+//   - name: Span name; use one of the Span* constants from spans.go. Names
+//     registered in writeSpanNames additionally mark the enclosing Reconcile
+//     as a write operation, so its Spans are retained instead of being
+//     dropped as no-op.
+//   - attrs: optional attributes built with attribute.String/Int/... and the
+//     Attr* keys from spans.go.
+//
+// Returns the context carrying the new Span (pass it to the instrumented
+// call) and the Span itself (pass it to EndSpan).
+func StartSpan(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
 	// If no valid parent span exists in ctx, return noop to avoid orphan spans.
 	if !trace.SpanFromContext(ctx).SpanContext().IsValid() {
 		return ctx, trace.SpanFromContext(context.Background())
@@ -94,7 +115,7 @@ func StartChildSpan(ctx context.Context, spanName string, attrs ...attribute.Key
 	// A write-operation Span (e.g. CreatePod, DeletePod, updateSandboxStatus)
 	// means this Reconcile did real work; mark it so the enclosing Reconcile and
 	// EnsureSandbox* Spans are retained rather than filtered as no-op.
-	if writeSpanNames[spanName] {
+	if writeSpanNames[name] {
 		MarkWrite(ctx)
 	}
 
@@ -105,16 +126,35 @@ func StartChildSpan(ctx context.Context, spanName string, attrs ...attribute.Key
 	if len(attrs) > 0 {
 		opts = append(opts, trace.WithAttributes(attrs...))
 	}
-	return tracer.Start(ctx, spanName, opts...)
+	return tracer.Start(ctx, name, opts...)
 }
 
-// EndSpanWithWriteCheck ends span, first marking it no-op when the current
-// Reconcile performed no write operation (see MarkWrite/HasWrite). No-op Spans
-// are dropped by FilteringSpanProcessor so that empty, write-free Reconcile
-// iterations (and their EnsureSandbox* children) stay out of the trace, while
-// any Reconcile that created/deleted a Pod or patched status is fully retained.
-func EndSpanWithWriteCheck(ctx context.Context, span trace.Span) {
-	if !HasWrite(ctx) {
+// EndSpan ends a Span returned by StartSpan or StartReconcileSpan and records
+// the outcome of the instrumented operation in a single call:
+//
+//	tracing.EndSpan(ctx, span, err)
+//
+// Parameters:
+//   - ctx: the context returned by StartSpan or StartReconcileSpan.
+//   - span: the Span to end.
+//   - err: the error returned by the instrumented operation, nil on success.
+//     The Span status is set to codes.Error with err's message when err is
+//     non-nil, and to codes.Ok otherwise, so failed operations stand out in
+//     trace UIs such as Jaeger.
+//
+// In addition, a Reconcile-scoped Span (one whose context carries the write
+// flag installed by StartReconcileSpan) is marked no-op and dropped by the
+// FilteringSpanProcessor when the Reconcile performed no write operation,
+// keeping empty Reconcile iterations out of exported traces. Spans outside a
+// Reconcile (e.g. sandbox-manager request handling) carry no write flag and
+// are always exported.
+func EndSpan(ctx context.Context, span trace.Span, err error) {
+	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+	} else {
+		span.SetStatus(codes.Ok, "")
+	}
+	if _, scoped := ctx.Value(writeFlagKey{}).(*writeFlag); scoped && !hasWrite(ctx) {
 		span.SetAttributes(attribute.Bool(AttrReconcileNoop, true))
 	}
 	span.End()

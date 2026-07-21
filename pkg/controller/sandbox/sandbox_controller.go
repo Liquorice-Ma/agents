@@ -273,7 +273,9 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 		if traceID := tracing.TraceIDFromContext(ctx); traceID != "" {
 			ctx = klog.NewContext(ctx, klog.FromContext(ctx).WithValues("traceID", traceID))
 		}
-		defer tracing.EndSpanWithWriteCheck(ctx, reconcileSpan)
+		// End the Reconcile span via defer so it covers the whole iteration. Its
+		// status stays Ok; per-operation outcomes are recorded on child spans.
+		defer tracing.EndSpan(ctx, reconcileSpan, nil)
 		if box.Status.Phase != agentsv1alpha1.SandboxFailed && box.Status.Phase != agentsv1alpha1.SandboxSucceeded {
 			klog.FromContext(ctx).Info("Sandbox Delete started", "sandbox", klog.KObj(box), "previousPhase", string(box.Status.Phase))
 		}
@@ -319,31 +321,33 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 	if traceID := tracing.TraceIDFromContext(ctx); traceID != "" {
 		ctx = klog.NewContext(ctx, klog.FromContext(ctx).WithValues("traceID", traceID))
 	}
-	defer tracing.EndSpanWithWriteCheck(ctx, reconcileSpan)
+	// End the Reconcile span via defer so it covers the whole iteration. Its
+	// status stays Ok; per-operation outcomes are recorded on child spans.
+	defer tracing.EndSpan(ctx, reconcileSpan, nil)
 
 	phaseBefore := newStatus.Phase
 
 	switch newStatus.Phase {
 	case agentsv1alpha1.SandboxPending:
-		ctx, span := tracing.StartChildSpan(ctx, tracing.SpanControllerEnsureSandboxRunning)
+		ctx, span := tracing.StartSpan(ctx, tracing.SpanControllerEnsureSandboxRunning)
 		requeueAfter, err = r.getControl(args.Pod).EnsureSandboxRunning(ctx, args)
-		tracing.EndSpanWithWriteCheck(ctx, span)
+		tracing.EndSpan(ctx, span, err)
 	case agentsv1alpha1.SandboxRunning:
-		ctx, span := tracing.StartChildSpan(ctx, tracing.SpanControllerEnsureSandboxUpdated)
+		ctx, span := tracing.StartSpan(ctx, tracing.SpanControllerEnsureSandboxUpdated)
 		err = r.getControl(args.Pod).EnsureSandboxUpdated(ctx, args)
-		tracing.EndSpanWithWriteCheck(ctx, span)
+		tracing.EndSpan(ctx, span, err)
 	case agentsv1alpha1.SandboxPaused:
-		ctx, span := tracing.StartChildSpan(ctx, tracing.SpanControllerEnsureSandboxPaused)
+		ctx, span := tracing.StartSpan(ctx, tracing.SpanControllerEnsureSandboxPaused)
 		err = r.EnsureSandboxPaused(ctx, args)
-		tracing.EndSpanWithWriteCheck(ctx, span)
+		tracing.EndSpan(ctx, span, err)
 	case agentsv1alpha1.SandboxResuming:
-		ctx, span := tracing.StartChildSpan(ctx, tracing.SpanControllerEnsureSandboxResumed)
+		ctx, span := tracing.StartSpan(ctx, tracing.SpanControllerEnsureSandboxResumed)
 		err = r.getControl(args.Pod).EnsureSandboxResumed(ctx, args)
-		tracing.EndSpanWithWriteCheck(ctx, span)
+		tracing.EndSpan(ctx, span, err)
 	case agentsv1alpha1.SandboxUpgrading:
-		ctx, span := tracing.StartChildSpan(ctx, tracing.SpanControllerEnsureSandboxUpgraded)
+		ctx, span := tracing.StartSpan(ctx, tracing.SpanControllerEnsureSandboxUpgraded)
 		err = r.getControl(args.Pod).EnsureSandboxUpgraded(ctx, args)
-		tracing.EndSpanWithWriteCheck(ctx, span)
+		tracing.EndSpan(ctx, span, err)
 	case agentsv1alpha1.SandboxRecycling:
 		requeueAfter, err = r.getControl(args.Pod).EnsureSandboxRecycled(ctx, args)
 	default:
@@ -413,16 +417,16 @@ func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus a
 	}
 	oldPhase := box.Status.Phase
 
-	ctx, span := tracing.StartChildSpan(ctx, tracing.SpanControllerUpdateStatus,
+	ctx, span := tracing.StartSpan(ctx, tracing.SpanControllerUpdateStatus,
 		attribute.String(tracing.AttrPhaseBefore, string(box.Status.Phase)),
 		attribute.String(tracing.AttrPhaseAfter, string(newStatus.Phase)),
 	)
-	defer span.End()
 
 	by, _ := json.Marshal(newStatus)
 	patchStatus := fmt.Sprintf(`{"status":%s}`, string(by))
 	rcvObject := &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Namespace: box.Namespace, Name: box.Name}}
 	err := client.IgnoreNotFound(r.Status().Patch(ctx, rcvObject, client.RawPatch(types.MergePatchType, []byte(patchStatus))))
+	tracing.EndSpan(ctx, span, err)
 	if err != nil {
 		klog.FromContext(ctx).Error(err, "update sandbox status failed", "sandbox", klog.KObj(box), "patchStatus", patchStatus)
 		return err

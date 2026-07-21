@@ -142,7 +142,7 @@ func TestStartReconcileSpan_NoopTracer(t *testing.T) {
 	_ = ctx
 }
 
-func TestStartChildSpan_WithinReconcile(t *testing.T) {
+func TestStartSpan_WithinReconcile(t *testing.T) {
 	prevTP := otel.GetTracerProvider()
 	prevProp := otel.GetTextMapPropagator()
 	defer func() {
@@ -177,7 +177,7 @@ func TestStartChildSpan_WithinReconcile(t *testing.T) {
 	defer reconcileSpan.End()
 
 	// Start a child span within the Reconcile context.
-	_, childSpan := StartChildSpan(reconcileCtx, SpanControllerCreatePod,
+	_, childSpan := StartSpan(reconcileCtx, SpanControllerCreatePod,
 		attribute.String(AttrPodName, "test-pod"),
 	)
 	defer childSpan.End()
@@ -189,11 +189,11 @@ func TestStartChildSpan_WithinReconcile(t *testing.T) {
 		"child span should have a different span ID from reconcile span")
 }
 
-func TestStartChildSpan_WithNoopTracer(t *testing.T) {
+func TestStartSpan_WithNoopTracer(t *testing.T) {
 	cleanup := initNoopTracer()
 	defer cleanup()
 
-	ctx, span := StartChildSpan(context.Background(), "test-child-span")
+	ctx, span := StartSpan(context.Background(), "test-child-span")
 	defer span.End()
 
 	assert.False(t, span.SpanContext().IsValid(),

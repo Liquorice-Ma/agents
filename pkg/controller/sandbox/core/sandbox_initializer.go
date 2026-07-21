@@ -136,7 +136,7 @@ func Initialize(ctx context.Context, box *agentsv1alpha1.Sandbox, newStatus *age
 		for _, m := range mountOptionList {
 			drivers = append(drivers, m.Driver)
 		}
-		csiCtx, csiSpan := tracing.StartChildSpan(ctx, tracing.SpanControllerProcessCSIMounts,
+		csiCtx, csiSpan := tracing.StartSpan(ctx, tracing.SpanControllerProcessCSIMounts,
 			attribute.Int(tracing.AttrCSIVolumeCount, len(mountOptionList)),
 			attribute.StringSlice(tracing.AttrCSIVolumes, drivers),
 		)
@@ -145,7 +145,7 @@ func Initialize(ctx context.Context, box *agentsv1alpha1.Sandbox, newStatus *age
 		})
 		// End the span explicitly so it only covers the mount duration,
 		// not the rest of this function.
-		csiSpan.End()
+		tracing.EndSpan(csiCtx, csiSpan, mountErr)
 		if mountErr != nil {
 			return fmt.Errorf("failed to perform ReCSIMount after resume: %w", mountErr)
 		}
