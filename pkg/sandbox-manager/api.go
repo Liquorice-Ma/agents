@@ -329,6 +329,8 @@ func (m *SandboxManager) syncRoute(ctx context.Context, sbx infra.Sandbox, refre
 }
 
 // PauseSandbox pauses a sandbox and syncs route with peers
+//
+//nolint:dupl // PauseSandbox and ResumeSandbox are intentionally symmetric flows.
 func (m *SandboxManager) PauseSandbox(ctx context.Context, sbx infra.Sandbox, opts infra.PauseOptions) (err error) {
 	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanManagerPauseSandbox)
 	defer func() { tracing.EndSpan(ctx, span, err) }()
@@ -348,6 +350,8 @@ func (m *SandboxManager) PauseSandbox(ctx context.Context, sbx infra.Sandbox, op
 }
 
 // ResumeSandbox resumes a sandbox and syncs route with peers
+//
+//nolint:dupl // PauseSandbox and ResumeSandbox are intentionally symmetric flows.
 func (m *SandboxManager) ResumeSandbox(ctx context.Context, sbx infra.Sandbox, opts infra.ResumeOptions) (err error) {
 	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanManagerResumeSandbox)
 	defer func() { tracing.EndSpan(ctx, span, err) }()

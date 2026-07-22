@@ -39,20 +39,19 @@ const (
 
 // Span name constants for sandbox-controller.
 const (
-	SpanControllerReconcile               = "controller.Reconcile"
-	SpanControllerEnsureSandboxRunning    = "controller.EnsureSandboxRunning"
-	SpanControllerEnsureSandboxUpdated    = "controller.EnsureSandboxUpdated"
-	SpanControllerEnsureSandboxPaused     = "controller.EnsureSandboxPaused"
-	SpanControllerEnsureSandboxResumed    = "controller.EnsureSandboxResumed"
-	SpanControllerEnsureSandboxUpgraded   = "controller.EnsureSandboxUpgraded"
-	SpanControllerEnsureSandboxTerminated = "controller.EnsureSandboxTerminated"
-	SpanControllerCreatePod               = "controller.CreatePod"
-	SpanControllerDeletePod               = "controller.DeletePod"
-	SpanControllerPatchPod                = "controller.PatchPod"
-	SpanControllerRemoveFinalizer         = "controller.RemoveFinalizer"
-	SpanControllerCheckpoint              = "controller.Checkpoint"
-	SpanControllerProcessCSIMounts        = "controller.ProcessCSIMounts"
-	SpanControllerUpdateStatus            = "controller.updateSandboxStatus"
+	SpanControllerReconcile             = "controller.Reconcile"
+	SpanControllerEnsureSandboxRunning  = "controller.EnsureSandboxRunning"
+	SpanControllerEnsureSandboxUpdated  = "controller.EnsureSandboxUpdated"
+	SpanControllerEnsureSandboxPaused   = "controller.EnsureSandboxPaused"
+	SpanControllerEnsureSandboxResumed  = "controller.EnsureSandboxResumed"
+	SpanControllerEnsureSandboxUpgraded = "controller.EnsureSandboxUpgraded"
+	SpanControllerCreatePod             = "controller.CreatePod"
+	SpanControllerDeletePod             = "controller.DeletePod"
+	SpanControllerPatchPod              = "controller.PatchPod"
+	SpanControllerRemoveFinalizer       = "controller.RemoveFinalizer"
+	SpanControllerCheckpoint            = "controller.Checkpoint"
+	SpanControllerProcessCSIMounts      = "controller.ProcessCSIMounts"
+	SpanControllerUpdateStatus          = "controller.updateSandboxStatus"
 )
 
 // Attribute key constants for Spans.
@@ -65,11 +64,8 @@ const (
 	AttrSandboxPhase        = "sandbox.phase"
 	AttrPodName             = "pod.name"
 	AttrCheckpointName      = "checkpoint.name"
-	AttrCheckpointID        = "checkpoint.id"
-	AttrCheckpointPhase     = "checkpoint.phase"
 	AttrPhaseBefore         = "phase.before"
 	AttrPhaseAfter          = "phase.after"
-	AttrPatchType           = "patch.type"
 	AttrClaimLockType       = "claim.lock_type"
 	AttrClaimRetries        = "claim.retries"
 	AttrClaimDuration       = "claim.duration"
@@ -82,9 +78,6 @@ const (
 	AttrRouteID             = "route.id"
 	AttrPeersSynced         = "peers.synced"
 	AttrReuseTriggered      = "reuse.triggered"
-	AttrPersistentContents  = "persistent_contents"
-	AttrTemplate            = "template"
-	AttrTimeout             = "timeout"
 
 	// AttrReconcileNoop marks a Reconcile (or its EnsureSandbox* child) Span that
 	// performed no real write operation. Spans carrying this attribute are dropped
