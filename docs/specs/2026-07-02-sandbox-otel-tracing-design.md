@@ -172,7 +172,7 @@ Create Spans for controller-runtime Reconcile iterations.
 // Extracts trace context from the Sandbox object's annotation to establish parent-child
 // relationship with the sandbox-manager root Span. Multiple Reconcile passes produce sibling Spans.
 // Note: The caller should check whether work is needed before calling this function.
-func StartReconcileSpan(ctx context.Context, obj client.Object, controllerName string) (context.Context, trace.Span)
+func StartReconcileSpan(ctx context.Context, obj client.Object) (context.Context, trace.Span)
 
 // StartControllerSpan creates a child Span for a specific IO operation within Reconcile.
 // It never creates a root Span: without a valid parent in ctx it returns a no-op Span.
@@ -233,7 +233,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
     if err != nil { return reconcile.Result{}, err }
 
     // --- Tracing: create Reconcile Span ---
-    ctx, reconcileSpan := tracing.StartReconcileSpan(ctx, box, "sandbox-controller")
+    ctx, reconcileSpan := tracing.StartReconcileSpan(ctx, box)
     // The Reconcile span status stays Ok; per-operation outcomes are recorded
     // on child spans via EndSpan.
     defer tracing.EndSpan(ctx, reconcileSpan, nil)

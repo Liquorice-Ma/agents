@@ -73,7 +73,7 @@ func BenchmarkReconcileSpan_NoWrite(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		ctx, span := StartReconcileSpan(context.Background(), box, "sandbox-controller")
+		ctx, span := StartReconcileSpan(context.Background(), box)
 		// No MarkWrite — simulates an empty Reconcile with no write operations.
 		EndSpan(ctx, span, nil)
 	}
@@ -94,7 +94,7 @@ func BenchmarkReconcileSpan_WithWrite(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		ctx, span := StartReconcileSpan(context.Background(), box, "sandbox-controller")
+		ctx, span := StartReconcileSpan(context.Background(), box)
 		MarkWrite(ctx)
 		EndSpan(ctx, span, nil)
 	}
@@ -115,7 +115,7 @@ func BenchmarkReconcileSpan_WithChildWrite(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		ctx, reconcileSpan := StartReconcileSpan(context.Background(), box, "sandbox-controller")
+		ctx, reconcileSpan := StartReconcileSpan(context.Background(), box)
 		ctx, childSpan := StartControllerSpan(ctx, SpanControllerCreatePod)
 		EndSpan(ctx, childSpan, nil)
 		EndSpan(ctx, reconcileSpan, nil)

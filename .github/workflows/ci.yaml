@@ -62,7 +62,8 @@ jobs:
         with:
           version: ${{ env.GOLANGCI_VERSION }}
           args: --verbose
-          skip-cache: true
+          skip-pkg-cache: true
+          mod: readonly
       - name: Run Trivy vulnerability scanner in repo mode
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # master
         with:

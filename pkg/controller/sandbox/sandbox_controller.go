@@ -268,7 +268,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 		// Always create Reconcile span so child spans (EnsureSandboxTerminated,
 		// DeletePod) have a valid parent. The span is dropped by
 		// FilteringSpanProcessor when no write operation occurred.
-		ctx, reconcileSpan := tracing.StartReconcileSpan(ctx, box, "sandbox-controller")
+		ctx, reconcileSpan := tracing.StartReconcileSpan(ctx, box)
 		reconcileSpan.SetAttributes(attribute.String(tracing.AttrSandboxPhase, string(box.Status.Phase)))
 		if traceID := tracing.TraceIDFromContext(ctx); traceID != "" {
 			ctx = klog.NewContext(ctx, klog.FromContext(ctx).WithValues("traceID", traceID))
@@ -316,7 +316,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 
 	// Create Reconcile span for non-terminating, non-completed reconciles.
 	// Tracing must start here to avoid creating noise spans for no-op iterations.
-	ctx, reconcileSpan := tracing.StartReconcileSpan(ctx, box, "sandbox-controller")
+	ctx, reconcileSpan := tracing.StartReconcileSpan(ctx, box)
 	reconcileSpan.SetAttributes(attribute.String(tracing.AttrSandboxPhase, string(newStatus.Phase)))
 	if traceID := tracing.TraceIDFromContext(ctx); traceID != "" {
 		ctx = klog.NewContext(ctx, klog.FromContext(ctx).WithValues("traceID", traceID))

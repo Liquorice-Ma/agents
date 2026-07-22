@@ -62,7 +62,7 @@ func TestStartReconcileSpan_WithTraceContext(t *testing.T) {
 	box.SetAnnotations(annotations)
 
 	// Start Reconcile span.
-	reconcileCtx, reconcileSpan := StartReconcileSpan(context.Background(), box, "sandbox-controller")
+	reconcileCtx, reconcileSpan := StartReconcileSpan(context.Background(), box)
 	defer reconcileSpan.End()
 
 	assert.True(t, reconcileSpan.SpanContext().IsValid(), "reconcile span should be valid")
@@ -74,7 +74,7 @@ func TestStartReconcileSpan_WithTraceContext(t *testing.T) {
 	parentSpan.End()
 
 	// Start a second Reconcile span (sibling) from the same annotations.
-	reconcileCtx2, reconcileSpan2 := StartReconcileSpan(context.Background(), box, "sandbox-controller")
+	reconcileCtx2, reconcileSpan2 := StartReconcileSpan(context.Background(), box)
 	defer reconcileSpan2.End()
 
 	assert.Equal(t, reconcileSpan.SpanContext().TraceID(), reconcileSpan2.SpanContext().TraceID(),
@@ -111,7 +111,7 @@ func TestStartReconcileSpan_WithoutAnnotations(t *testing.T) {
 	}
 	// No annotations — kubectl-created sandbox has no trace context.
 
-	ctx, span := StartReconcileSpan(context.Background(), box, "sandbox-controller")
+	ctx, span := StartReconcileSpan(context.Background(), box)
 	defer span.End()
 
 	// Without trace-context annotation, StartReconcileSpan starts a new root trace.
@@ -134,7 +134,7 @@ func TestStartReconcileSpan_NoopTracer(t *testing.T) {
 		},
 	}
 
-	ctx, span := StartReconcileSpan(context.Background(), box, "sandbox-controller")
+	ctx, span := StartReconcileSpan(context.Background(), box)
 	defer span.End()
 
 	assert.False(t, span.SpanContext().IsValid(),
@@ -173,7 +173,7 @@ func TestStartControllerSpan_WithinReconcile(t *testing.T) {
 	box.SetAnnotations(InjectTraceContext(parentCtx, box.GetAnnotations()))
 
 	// Start Reconcile span first.
-	reconcileCtx, reconcileSpan := StartReconcileSpan(context.Background(), box, "sandbox-controller")
+	reconcileCtx, reconcileSpan := StartReconcileSpan(context.Background(), box)
 	defer reconcileSpan.End()
 
 	// Start a child span within the Reconcile context.
@@ -302,7 +302,7 @@ func TestStartReconcileSpan_StoresTraceIDInContext(t *testing.T) {
 		},
 	}
 
-	ctx, span := StartReconcileSpan(context.Background(), box, "sandbox-controller")
+	ctx, span := StartReconcileSpan(context.Background(), box)
 	defer span.End()
 
 	traceID := TraceIDFromContext(ctx)

@@ -96,7 +96,7 @@ func TestEndSpan_NoWrite_MarksNoop(t *testing.T) {
 			Name: "noop-test", Namespace: "default", UID: "noop-uid",
 		},
 	}
-	ctx, span := StartReconcileSpan(context.Background(), box, "sandbox-controller")
+	ctx, span := StartReconcileSpan(context.Background(), box)
 	// No MarkWrite call — this Reconcile did no write operation.
 	EndSpan(ctx, span, nil)
 
@@ -113,7 +113,7 @@ func TestEndSpan_WithWrite_RetainsSpan(t *testing.T) {
 			Name: "write-test", Namespace: "default", UID: "write-uid",
 		},
 	}
-	ctx, span := StartReconcileSpan(context.Background(), box, "sandbox-controller")
+	ctx, span := StartReconcileSpan(context.Background(), box)
 	// Simulate a write operation (e.g., CreatePod was called).
 	MarkWrite(ctx)
 	EndSpan(ctx, span, nil)
@@ -139,7 +139,7 @@ func TestStartControllerSpan_WriteOperation_MarksWriteFlag(t *testing.T) {
 			Name: "child-write-test", Namespace: "default", UID: "child-uid",
 		},
 	}
-	ctx, reconcileSpan := StartReconcileSpan(context.Background(), box, "sandbox-controller")
+	ctx, reconcileSpan := StartReconcileSpan(context.Background(), box)
 
 	// StartControllerSpan for a write-operation name should auto-mark the write flag.
 	ctx, childSpan := StartControllerSpan(ctx, SpanControllerCreatePod)
@@ -161,7 +161,7 @@ func TestStartControllerSpan_NonWriteOperation_DoesNotMarkWriteFlag(t *testing.T
 			Name: "child-nowrite-test", Namespace: "default", UID: "child-nowrite-uid",
 		},
 	}
-	ctx, reconcileSpan := StartReconcileSpan(context.Background(), box, "sandbox-controller")
+	ctx, reconcileSpan := StartReconcileSpan(context.Background(), box)
 
 	// StartControllerSpan for a non-write-operation name should NOT mark the write flag.
 	ctx, childSpan := StartControllerSpan(ctx, SpanControllerEnsureSandboxUpdated)

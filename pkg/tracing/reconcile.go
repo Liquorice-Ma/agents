@@ -31,8 +31,9 @@ import (
 const (
 	// managerTracerName scopes all sandbox-manager spans.
 	managerTracerName = "sandbox-manager"
-	// controllerTracerName scopes all sandbox-controller operation spans.
-	controllerTracerName = "sandbox"
+	// controllerTracerName scopes all sandbox-controller spans (Reconcile and
+	// operation spans alike), symmetric with managerTracerName.
+	controllerTracerName = "sandbox-controller"
 )
 
 // traceIDKey is the context key for storing the trace ID extracted from
@@ -64,7 +65,7 @@ func TraceIDFromContext(ctx context.Context) string {
 // IMPORTANT: The caller must invoke this AFTER all early-return paths that indicate
 // "no work to do" (e.g., Sandbox not found, terminal state, expectation unsatisfied).
 // This avoids creating noise Spans for no-op Reconciles.
-func StartReconcileSpan(ctx context.Context, obj client.Object, controllerName string) (context.Context, trace.Span) {
+func StartReconcileSpan(ctx context.Context, obj client.Object) (context.Context, trace.Span) {
 	// Extract trace context from CR annotations.
 	annotations := obj.GetAnnotations()
 	ctx = ExtractTraceContext(ctx, annotations)
@@ -74,7 +75,7 @@ func StartReconcileSpan(ctx context.Context, obj client.Object, controllerName s
 	// Spans with no write are dropped by FilteringSpanProcessor (see EndSpan).
 	ctx = withWriteFlag(ctx)
 
-	tracer := Tracer(controllerName)
+	tracer := Tracer(controllerTracerName)
 	attrs := []attribute.KeyValue{
 		attribute.String(AttrSandboxID, string(obj.GetUID())),
 		attribute.String(AttrSandboxNamespace, obj.GetNamespace()),

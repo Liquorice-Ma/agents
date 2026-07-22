@@ -5,8 +5,8 @@ ARG TARGETARCH
 
 WORKDIR /workspace
 # Copy the Go Modules manifests
-COPY go.mod go.mod
-COPY go.sum go.sum
+COPY ../go.mod go.mod
+COPY ../go.sum go.sum
 # cache deps before building and copying source so that we don't need to re-download as much
 # and so that source changes don't invalidate our downloaded layer
 RUN go mod download
@@ -15,12 +15,12 @@ RUN go mod download
 # IMPORTANT: copy the whole cmd/agent-sandbox-controller/ directory and build by
 # package path. Single-file builds (go build cmd/main.go) silently drop sibling
 # files such as ca_binding.go, leading to "undefined: executeCABindings".
-COPY cmd/agent-sandbox-controller/ cmd/agent-sandbox-controller/
-COPY api api/
-COPY pkg pkg/
-COPY client client/
-COPY proto proto/
-COPY test test/
+COPY ../cmd/agent-sandbox-controller/ cmd/agent-sandbox-controller/
+COPY ../api api/
+COPY ../pkg pkg/
+COPY ../client client/
+COPY ../proto proto/
+COPY ../test test/
 
 # Build
 # the GOARCH has not a default value to allow the binary be built according to the host where the command

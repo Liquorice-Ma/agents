@@ -148,15 +148,21 @@ func (r *commonControl) EnsureSandboxUpdated(ctx context.Context, args EnsureFun
 	// (PreUpgrade -> UpgradePod -> PostUpgrade). Recreate and CheckpointRestore
 	// are excluded here because they require the full lifecycle.
 	if !RequiresPodReplacementUpgrade(box) {
-		done, err := r.handleInplaceUpdateSandbox(ctx, args)
+		done, wrote, err := r.handleInplaceUpdateSandbox(ctx, args)
 		if err != nil {
 			return err
 		}
-		if done {
-			// handleInplaceUpdateSandbox performed an actual write (e.g. patched the
-			// Pod or set the InplaceUpdate condition). Mark the Reconcile write flag
-			// so the enclosing Reconcile span is retained.
+		if wrote {
+			// handleInplaceUpdateSandbox performed an actual write (e.g. patched
+			// the Pod or set an InplaceUpdate condition). Mark the Reconcile write
+			// flag so the enclosing Reconcile span is retained.
 			tracing.MarkWrite(ctx)
+		}
+		if !done {
+			// In-place update still in progress: early-return so that
+			// syncStatusFromPod does not overwrite the transient
+			// Ready=False/InplaceUpdate conditions set during the update.
+			return nil
 		}
 	}
 	r.syncStatusFromPod(pod, newStatus, true)
@@ -397,7 +403,7 @@ func (r *commonControl) EnsureSandboxTerminated(ctx context.Context, args Ensure
 	return nil
 }
 
-func (r *commonControl) handleInplaceUpdateSandbox(ctx context.Context, args EnsureFuncArgs) (bool, error) {
+func (r *commonControl) handleInplaceUpdateSandbox(ctx context.Context, args EnsureFuncArgs) (done bool, wrote bool, err error) {
 	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
 	handler := &CommonInPlaceUpdateHandler{
 		control:  r.inplaceUpdateControl,

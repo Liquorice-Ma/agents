@@ -94,7 +94,8 @@ func WithRootSpanContext(ctx context.Context) context.Context {
 // children of the root span.
 //
 // If annotations is nil, initializes a new map.
-// If tracing is disabled or no active span exists, returns annotations unchanged.
+// If tracing is disabled or no active span exists, returns annotations without
+// injecting anything (except it may allocate an empty map when annotations is nil).
 func InjectTraceContext(ctx context.Context, annotations map[string]string) map[string]string {
 	if annotations == nil {
 		annotations = make(map[string]string)

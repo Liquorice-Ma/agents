@@ -53,10 +53,6 @@ func (sc *Controller) CreateSnapshot(r *http.Request) (web.ApiResponse[*models.S
 			Message: fmt.Sprintf("Sandbox %s is not running", sandboxID),
 		}
 	}
-	// Capture the HTTP root span context before creating child spans, so that
-	// the trace context injected into the Checkpoint CR points at the root span
-	// and the controller-side spans attach to it correctly.
-	ctx = tracing.WithRootSpanContext(ctx)
 	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanManagerCreateSnapshot)
 	// Record optional request extensions as span attributes when present.
 	if request.Extensions.KeepRunning != nil {
