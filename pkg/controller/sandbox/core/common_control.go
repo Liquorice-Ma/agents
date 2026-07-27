@@ -137,7 +137,13 @@ func (r *commonControl) EnsureSandboxUpdated(ctx context.Context, args EnsureFun
 			klog.FromContext(ctx).Info("Waiting for pod ready before initialization", "sandbox", klog.KObj(box))
 			return nil
 		}
-		if err := r.initializer.Initialize(ctx, box, newStatus); err != nil {
+		// Trace the initialization so its latency is observable in Jaeger. The
+		// span name is registered in writeSpanNames, so StartControllerSpan
+		// marks the enclosing Reconcile as having written.
+		ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerAgentRuntimeInit)
+		err := r.initializer.Initialize(ctx, box, newStatus)
+		tracing.EndSpan(ctx, span, err)
+		if err != nil {
 			return err
 		}
 	}
@@ -253,8 +259,15 @@ func (r *commonControl) EnsureSandboxPaused(ctx context.Context, args EnsureFunc
 		return nil
 	}
 
-	// Validate images and create pod-info checkpoint before deletion
-	if rejected := r.checkpointControl.AssumePodCheckpointed(ctx, pod, box, newStatus, cond); rejected {
+	// Validate images and create pod-info checkpoint before deletion. Traced
+	// so checkpoint validation latency is observable in Jaeger; the span is
+	// read-mostly and the actual checkpoint creation inside is traced (and
+	// write-marked) by SpanControllerCheckpoint.
+	ctx, cpSpan := tracing.StartControllerSpan(ctx, tracing.SpanControllerAssumePodCheckpointed)
+	rejected := r.checkpointControl.AssumePodCheckpointed(ctx, pod, box, newStatus, cond)
+	cpSpan.SetAttributes(attribute.Bool(tracing.AttrCheckpointRejected, rejected))
+	tracing.EndSpan(ctx, cpSpan, nil)
+	if rejected {
 		return nil
 	}
 

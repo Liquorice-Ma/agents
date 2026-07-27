@@ -51,19 +51,35 @@ const (
 	SpanControllerRemoveFinalizer       = "controller.RemoveFinalizer"
 	SpanControllerCheckpoint            = "controller.Checkpoint"
 	SpanControllerProcessCSIMounts      = "controller.ProcessCSIMounts"
+	SpanControllerAgentRuntimeInit      = "controller.AgentRuntimeInit"
 	SpanControllerUpdateStatus          = "controller.updateSandboxStatus"
+
+	// SpanControllerAssumePodCheckpointed covers the checkpoint validation flow
+	// before pod deletion on pause (image validation + checkpoint polling). It
+	// is read-mostly, so it is intentionally NOT in writeSpanNames: the actual
+	// checkpoint creation inside is traced by SpanControllerCheckpoint, which
+	// marks the write.
+	SpanControllerAssumePodCheckpointed = "controller.AssumePodCheckpointed"
+	// SpanControllerCheckpointCleanup covers pod-info checkpoint cleanup. It is
+	// intentionally NOT in writeSpanNames: the cleanup marks the write
+	// explicitly only when a checkpoint is actually deleted, so empty cleanups
+	// don't retain no-op iterations.
+	SpanControllerCheckpointCleanup = "controller.CheckpointCleanup"
 )
 
 // Attribute key constants for Spans.
 const (
 	// AttrRequestID carries the normalized request ID on the manager root Span.
-	AttrRequestID           = "request.id"
-	AttrSandboxID           = "sandbox.id"
-	AttrSandboxName         = "sandbox.name"
-	AttrSandboxNamespace    = "sandbox.namespace"
-	AttrSandboxPhase        = "sandbox.phase"
-	AttrPodName             = "pod.name"
-	AttrCheckpointName      = "checkpoint.name"
+	AttrRequestID        = "request.id"
+	AttrSandboxID        = "sandbox.id"
+	AttrSandboxName      = "sandbox.name"
+	AttrSandboxNamespace = "sandbox.namespace"
+	AttrSandboxPhase     = "sandbox.phase"
+	AttrPodName          = "pod.name"
+	AttrCheckpointName   = "checkpoint.name"
+	// AttrCheckpointRejected records whether AssumePodCheckpointed rejected the
+	// pause (validation failed or checkpoint not yet complete).
+	AttrCheckpointRejected  = "checkpoint.rejected"
 	AttrPhaseBefore         = "phase.before"
 	AttrPhaseAfter          = "phase.after"
 	AttrClaimLockType       = "claim.lock_type"
@@ -96,5 +112,6 @@ var writeSpanNames = map[string]bool{
 	SpanControllerRemoveFinalizer:  true,
 	SpanControllerCheckpoint:       true,
 	SpanControllerProcessCSIMounts: true,
+	SpanControllerAgentRuntimeInit: true,
 	SpanControllerUpdateStatus:     true,
 }

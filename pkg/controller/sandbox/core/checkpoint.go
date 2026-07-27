@@ -162,8 +162,17 @@ func (c *CheckpointControl) Cleanup(ctx context.Context, box *agentsv1alpha1.San
 	if !utilfeature.DefaultFeatureGate.Enabled(features.SandboxPauseCheckpointGate) {
 		return
 	}
+	// Trace the cleanup so its latency is observable in Jaeger. The span is
+	// not in writeSpanNames: the write is marked explicitly below only when a
+	// checkpoint is actually deleted, so empty cleanups don't retain no-op
+	// iterations. Cleanup stays best-effort; errors are only recorded on the
+	// span so failures are visible in traces.
+	ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerCheckpointCleanup)
+	var err error
+	defer func() { tracing.EndSpan(ctx, span, err) }()
 	cpList, cpErr := listCheckpointsForSandbox(ctx, c.Client, box, agentsv1alpha1.CheckpointTypePodInfo)
 	if cpErr != nil {
+		err = cpErr
 		klog.FromContext(ctx).Error(cpErr, "Failed to list checkpoints for cleanup", "sandbox", klog.KObj(box))
 		return
 	}
@@ -172,7 +181,11 @@ func (c *CheckpointControl) Cleanup(ctx context.Context, box *agentsv1alpha1.San
 		if delErr := c.Delete(ctx, &cpList[i]); delErr != nil && !errors.IsNotFound(delErr) {
 			ScaleExpectation.ObserveScale(GetControllerKey(box), expectations.Delete, cpList[i].Name)
 			klog.FromContext(ctx).Error(delErr, "Failed to delete checkpoint after resume", "sandbox", klog.KObj(box), "checkpoint", cpList[i].Name)
+			err = delErr
 		} else {
+			// Deleting the checkpoint is a real write; mark the Reconcile so
+			// its spans are retained.
+			tracing.MarkWrite(ctx)
 			klog.FromContext(ctx).Info("Deleted checkpoint after successful resume", "sandbox", klog.KObj(box), "checkpoint", cpList[i].Name)
 		}
 	}

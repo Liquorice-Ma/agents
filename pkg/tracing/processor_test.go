@@ -29,7 +29,9 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
@@ -235,6 +237,11 @@ func TestEndSpan_SetsStatus(t *testing.T) {
 	}{
 		{name: "success sets Ok", err: nil, wantStatus: codes.Ok},
 		{name: "error sets Error", err: errors.New("boom"), wantStatus: codes.Error},
+		{
+			name:       "AlreadyExists is treated as success",
+			err:        apierrors.NewAlreadyExists(schema.GroupResource{Resource: "pods"}, "test-pod"),
+			wantStatus: codes.Ok,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -248,7 +255,7 @@ func TestEndSpan_SetsStatus(t *testing.T) {
 			require.Equal(t, 1, rec.len(), "span should be exported")
 			recorded := rec.getSpans()[0]
 			assert.Equal(t, tt.wantStatus, recorded.Status().Code)
-			if tt.err != nil {
+			if tt.wantStatus == codes.Error {
 				assert.Contains(t, recorded.Status().Description, tt.err.Error())
 			}
 		})
