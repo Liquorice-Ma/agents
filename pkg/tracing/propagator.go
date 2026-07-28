@@ -87,18 +87,34 @@ func WithRootSpanContext(ctx context.Context) context.Context {
 	return context.WithValue(ctx, rootSpanContextKey{}, spanCtx)
 }
 
+// HasInjectableTraceContext reports whether ctx carries a valid span context
+// that InjectTraceContext would propagate into annotations. Callers can use
+// it as a cheap guard to skip work that only exists for trace propagation
+// (e.g. a DeepCopy + Patch before deletion) when tracing is disabled or no
+// span is active.
+func HasInjectableTraceContext(ctx context.Context) bool {
+	if rootSpanCtx, ok := ctx.Value(rootSpanContextKey{}).(trace.SpanContext); ok && rootSpanCtx.IsValid() {
+		return true
+	}
+	return trace.SpanContextFromContext(ctx).IsValid()
+}
+
 // InjectTraceContext injects the trace context from ctx into annotations.
 // If a root span context was stored via WithRootSpanContext, it is used
 // instead of the current span, so that the annotation's traceparent carries
 // the root span's SpanID. This makes controller Reconcile spans direct
 // children of the root span.
 //
-// If annotations is nil, initializes a new map.
-// If tracing is disabled or no active span exists, returns annotations without
-// injecting anything (except it may allocate an empty map when annotations is nil).
+// When there is nothing to inject (tracing disabled or no valid span in
+// ctx), the input is returned untouched — nil stays nil and no map is
+// allocated — so callers can cheaply detect "nothing injected" and skip
+// otherwise useless API writes (e.g. a Patch whose only purpose is trace
+// propagation).
 func InjectTraceContext(ctx context.Context, annotations map[string]string) map[string]string {
-	if annotations == nil {
-		annotations = make(map[string]string)
+	// Fast path: the W3C propagator injects nothing without a valid span
+	// context, so return the input as-is instead of allocating a map.
+	if !HasInjectableTraceContext(ctx) {
+		return annotations
 	}
 
 	// Prefer root span context if available, so that the traceparent carries
@@ -107,6 +123,9 @@ func InjectTraceContext(ctx context.Context, annotations map[string]string) map[
 		ctx = trace.ContextWithSpanContext(ctx, rootSpanCtx)
 	}
 
+	if annotations == nil {
+		annotations = make(map[string]string, 1)
+	}
 	carrier := &annotationCarrier{annotations: annotations}
 	otel.GetTextMapPropagator().Inject(ctx, carrier)
 	return annotations

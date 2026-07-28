@@ -69,16 +69,19 @@ func TestInjectTraceContext_NilAnnotations(t *testing.T) {
 		name    string
 		ctx     context.Context
 		hasSpan bool
+		wantNil bool
 	}{
 		{
-			name:    "nil annotations with no active span",
+			name:    "nil annotations with no active span stays nil",
 			ctx:     context.Background(),
 			hasSpan: false,
+			wantNil: true,
 		},
 		{
-			name:    "nil annotations with active span",
+			name:    "nil annotations with active span allocates and injects",
 			ctx:     context.Background(),
 			hasSpan: true,
+			wantNil: false,
 		},
 	}
 
@@ -95,7 +98,14 @@ func TestInjectTraceContext_NilAnnotations(t *testing.T) {
 			}
 
 			result := InjectTraceContext(tt.ctx, nil)
-			assert.NotNil(t, result, "should initialize a new map")
+			if tt.wantNil {
+				// Nothing to inject: the input must be returned untouched so
+				// callers can detect "nothing injected" and skip useless writes.
+				assert.Nil(t, result, "nil input should stay nil when nothing is injected")
+			} else {
+				assert.NotNil(t, result, "should allocate a map when injecting")
+				assert.NotEmpty(t, result[TraceContextAnnotationKey], "trace-context annotation should be injected")
+			}
 		})
 	}
 }
