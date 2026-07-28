@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"flag"
 	"fmt"
 	"os"
 
@@ -80,11 +81,28 @@ type Config struct {
 	Insecure      bool    // Use insecure gRPC (dev environment)
 }
 
+// BindFlags registers the tracing command-line flags on fs with shared
+// defaults and help text, storing parsed values into c. Both entrypoints
+// bind flag.CommandLine (the sandbox-manager pulls it into pflag via
+// AddGoFlagSet), so flag definitions cannot drift between binaries.
+// ServiceName is not a flag; each entrypoint sets it before Init.
+func (c *Config) BindFlags(fs *flag.FlagSet) {
+	fs.StringVar((*string)(&c.Mode), "tracing-mode", string(TracingModeNone), "Tracing mode: otel, std, file, none")
+	fs.StringVar(&c.Endpoint, "tracing-endpoint", DefaultEndpoint, "OTLP gRPC endpoint for tracing export")
+	fs.Float64Var(&c.SamplingRatio, "tracing-sampling-ratio", 1.0, "Trace sampling ratio (0.0 to 1.0)")
+	fs.BoolVar(&c.Insecure, "tracing-insecure", false, "Use insecure gRPC for tracing export (dev environment)")
+	fs.StringVar(&c.FilePath, "tracing-file", "", "Output file path for tracing export (file mode)")
+}
+
 // InitTracerProvider initializes the global TracerProvider and returns a shutdown function.
 // Must be called once at startup, before any controller or HTTP server starts.
 //
-// When cfg.Mode is "none" (or any unrecognized value), tracing is disabled:
-// a no-op TracerProvider is explicitly installed. The OpenTelemetry API is
+// When cfg.Mode is "none" (or empty, which is accepted as an alias so a
+// zero-value Config keeps working), tracing is disabled: a no-op
+// TracerProvider is explicitly installed. Any other unrecognized value is a
+// configuration error — returning it instead of silently disabling tracing
+// makes a typo in --tracing-mode fail fast at startup rather than being
+// diagnosed operationally. The OpenTelemetry API is
 // designed so that its default global TracerProvider is already a no-op
 // (API/SDK separation — libraries can embed tracing calls without the
 // application installing an SDK). We set it explicitly here to guarantee a
@@ -137,8 +155,9 @@ func InitTracerProvider(ctx context.Context, cfg Config) (func(context.Context) 
 		if err != nil {
 			return nil, fmt.Errorf("failed to create OTLP gRPC exporter: %w", err)
 		}
-	default:
-		// TracingModeNone or any unrecognized value: disable tracing.
+	case TracingModeNone, "":
+		// Tracing explicitly disabled (empty string is an alias for "none").
+		enabledFlag.Store(false)
 		noopTP := noop.NewTracerProvider()
 		otel.SetTracerProvider(noopTP)
 		// Install W3C propagator for deterministic Inject/Extract behavior,
@@ -148,6 +167,10 @@ func InitTracerProvider(ctx context.Context, cfg Config) (func(context.Context) 
 			propagation.Baggage{},
 		))
 		return func(context.Context) error { return nil }, nil
+	default:
+		// A typo in --tracing-mode must fail fast instead of silently
+		// disabling tracing, which is difficult to diagnose operationally.
+		return nil, fmt.Errorf("unrecognized tracing mode %q: valid values are otel, std, file, none", cfg.Mode)
 	}
 
 	// Create resource with service attributes. Code-provided values act as
@@ -184,10 +207,12 @@ func InitTracerProvider(ctx context.Context, cfg Config) (func(context.Context) 
 		propagation.TraceContext{},
 		propagation.Baggage{},
 	))
+	enabledFlag.Store(true)
 
 	// If file mode, wrap shutdown so the file is closed after flushing.
 	if fileWriter != nil {
 		return func(ctx context.Context) error {
+			enabledFlag.Store(false)
 			shutdownErr := tp.Shutdown(ctx)
 			closeErr := fileWriter.Close()
 			if shutdownErr != nil {
@@ -197,7 +222,10 @@ func InitTracerProvider(ctx context.Context, cfg Config) (func(context.Context) 
 		}, nil
 	}
 
-	return tp.Shutdown, nil
+	return func(ctx context.Context) error {
+		enabledFlag.Store(false)
+		return tp.Shutdown(ctx)
+	}, nil
 }
 
 // Tracer returns a tracer for the specified instrumentation scope.

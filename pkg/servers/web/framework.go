@@ -22,10 +22,8 @@ import (
 	"fmt"
 	"net/http"
 	"runtime"
-	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
@@ -71,30 +69,42 @@ func RegisterRoute[T any](mux *http.ServeMux, method, path string, handler Handl
 				writeJson(ctx, w, code, defaultCode, body, headers, requestID)
 			}
 		}
-		rawRequestID := r.Header.Get("X-Request-ID")
-		parsedRequestID, parseErr := uuid.Parse(rawRequestID)
-		if parseErr != nil {
-			parsedRequestID = uuid.New()
+		requestID := r.Header.Get("X-Request-ID")
+		if requestID == "" {
+			// Server-generated IDs are emitted directly in the representation
+			// required by the tracing scheme (32 hex chars, usable as an OTel
+			// TraceID as-is), so caller-visible values never need rewriting.
+			requestID = tracing.NewRequestID()
 		}
-		requestID := strings.ReplaceAll(parsedRequestID.String(), "-", "")
-		r.Header.Set("X-Request-ID", requestID)
 		// Derive context from request context to inherit cancellation when client disconnects
 		ctx := logs.NewContextFrom(r.Context(),
 			"requestID", requestID, "api", fmt.Sprintf("%s %s", method, path))
 		log := klog.FromContext(ctx)
+
+		// A caller-provided X-Request-ID is never rewritten. When tracing is
+		// enabled the request ID doubles as the OTel TraceID, so an ID that
+		// cannot serve as one is rejected with 400 instead of being silently
+		// replaced.
+		if tracing.Enabled() && !tracing.IsValidRequestID(requestID) {
+			safeWriteJson(ctx, w, http.StatusBadRequest, http.StatusBadRequest, &ApiError{
+				Code:    http.StatusBadRequest,
+				Message: "invalid X-Request-ID: must be 32 hex characters and not all-zero when tracing is enabled",
+			}, nil, requestID)
+			return
+		}
 
 		// Create the root span wrapping the entire request lifecycle
 		// (middlewares + handler). StartManagerRootSpan stores the request ID
 		// in ctx so the custom IDGenerator produces TraceID == request ID,
 		// enabling unified trace-log correlation.
 		ctx, rootSpan := tracing.StartManagerRootSpan(ctx, fmt.Sprintf("%s %s", method, path), requestID)
-		// apiErr carries the final middleware/handler error so the deferred
+		// err carries the final middleware/handler error so the deferred
 		// EndSpan can record the request outcome on the root span. The explicit
 		// nil check avoids the typed-nil *ApiError turning into a non-nil error.
-		var apiErr *ApiError
+		var err *ApiError
 		defer func() {
-			if apiErr != nil {
-				tracing.EndSpan(ctx, rootSpan, apiErr)
+			if err != nil {
+				tracing.EndSpan(ctx, rootSpan, err)
 			} else {
 				tracing.EndSpan(ctx, rootSpan, nil)
 			}
@@ -113,7 +123,7 @@ func RegisterRoute[T any](mux *http.ServeMux, method, path string, handler Handl
 					"recover", rec,
 					"stack", string(buf[:n]))
 				// Surface the panic on the root span as well.
-				apiErr = &ApiError{
+				err = &ApiError{
 					Code:    http.StatusInternalServerError,
 					Message: "Internal Server Error",
 				}
@@ -127,18 +137,17 @@ func RegisterRoute[T any](mux *http.ServeMux, method, path string, handler Handl
 		}()
 
 		for _, m := range middlewares {
-			if ctx, apiErr = m(ctx, r); apiErr != nil {
-				safeWriteJson(ctx, w, apiErr.Code, http.StatusInternalServerError, apiErr, nil, requestID)
+			if ctx, err = m(ctx, r); err != nil {
+				safeWriteJson(ctx, w, err.Code, http.StatusInternalServerError, err, nil, requestID)
 				return
 			}
 		}
 		start := time.Now()
 		log.V(utils.DebugLogLevel).Info("start handling request", "pattern", pattern)
-		var resp ApiResponse[T]
-		resp, apiErr = handler(r.WithContext(ctx))
-		if apiErr != nil {
-			log.Error(apiErr, "API Error", "path", r.URL.Path, "cost", time.Since(start))
-			safeWriteJson(ctx, w, apiErr.Code, http.StatusInternalServerError, apiErr, apiErr.Headers, requestID)
+		resp, err := handler(r.WithContext(ctx))
+		if err != nil {
+			log.Error(err, "API Error", "path", r.URL.Path, "cost", time.Since(start))
+			safeWriteJson(ctx, w, err.Code, http.StatusInternalServerError, err, err.Headers, requestID)
 		} else {
 			log.Info("API Success", "path", r.URL.Path, "cost", time.Since(start))
 			safeWriteJson(ctx, w, resp.Code, http.StatusOK, resp.Body, resp.Headers, requestID)

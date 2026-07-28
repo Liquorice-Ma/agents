@@ -19,8 +19,10 @@ package sandbox_manager
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel/attribute"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
@@ -328,46 +330,58 @@ func (m *SandboxManager) syncRoute(ctx context.Context, sbx infra.Sandbox, refre
 	return nil
 }
 
-// PauseSandbox pauses a sandbox and syncs route with peers
-//
-//nolint:dupl // PauseSandbox and ResumeSandbox are intentionally symmetric flows.
-func (m *SandboxManager) PauseSandbox(ctx context.Context, sbx infra.Sandbox, opts infra.PauseOptions) (err error) {
-	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanManagerPauseSandbox)
+// pauseResumeConfig carries the operation-specific parts of the shared
+// pause/resume orchestration in runPauseResume: span name, log verb,
+// metrics vectors, and the underlying sandbox operation.
+type pauseResumeConfig struct {
+	spanName  string
+	opName    string
+	responses *prometheus.CounterVec
+	duration  *prometheus.HistogramVec
+	op        func(ctx context.Context) error
+}
+
+// runPauseResume owns the orchestration shared by PauseSandbox and
+// ResumeSandbox: span lifecycle, timing/result metrics, and route sync.
+// Operation-specific behavior is provided via pauseResumeConfig.
+func (m *SandboxManager) runPauseResume(ctx context.Context, sbx infra.Sandbox, cfg pauseResumeConfig) (err error) {
+	ctx, span := tracing.StartManagerSpan(ctx, cfg.spanName)
 	defer func() { tracing.EndSpan(ctx, span, err) }()
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
 	start := time.Now()
-	if err := sbx.Pause(ctx, opts); err != nil {
-		log.Error(err, "failed to pause sandbox")
-		sandboxPauseResponses.WithLabelValues(sbx.GetNamespace(), "failure").Inc()
+	if err := cfg.op(ctx); err != nil {
+		log.Error(err, fmt.Sprintf("failed to %s sandbox", cfg.opName))
+		cfg.responses.WithLabelValues(sbx.GetNamespace(), "failure").Inc()
 		return err
 	}
-	sandboxPauseResponses.WithLabelValues(sbx.GetNamespace(), "success").Inc()
-	sandboxPauseDuration.WithLabelValues(sbx.GetNamespace()).Observe(time.Since(start).Seconds())
+	cfg.responses.WithLabelValues(sbx.GetNamespace(), "success").Inc()
+	cfg.duration.WithLabelValues(sbx.GetNamespace()).Observe(time.Since(start).Seconds())
 	if err := m.syncRoute(ctx, sbx, true); err != nil {
-		log.Error(err, "failed to sync route with peers after pause")
+		log.Error(err, fmt.Sprintf("failed to sync route with peers after %s", cfg.opName))
 	}
 	return nil
 }
 
+// PauseSandbox pauses a sandbox and syncs route with peers
+func (m *SandboxManager) PauseSandbox(ctx context.Context, sbx infra.Sandbox, opts infra.PauseOptions) error {
+	return m.runPauseResume(ctx, sbx, pauseResumeConfig{
+		spanName:  tracing.SpanManagerPauseSandbox,
+		opName:    "pause",
+		responses: sandboxPauseResponses,
+		duration:  sandboxPauseDuration,
+		op:        func(ctx context.Context) error { return sbx.Pause(ctx, opts) },
+	})
+}
+
 // ResumeSandbox resumes a sandbox and syncs route with peers
-//
-//nolint:dupl // PauseSandbox and ResumeSandbox are intentionally symmetric flows.
-func (m *SandboxManager) ResumeSandbox(ctx context.Context, sbx infra.Sandbox, opts infra.ResumeOptions) (err error) {
-	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanManagerResumeSandbox)
-	defer func() { tracing.EndSpan(ctx, span, err) }()
-	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
-	start := time.Now()
-	if err := sbx.Resume(ctx, opts); err != nil {
-		log.Error(err, "failed to resume sandbox")
-		sandboxResumeResponses.WithLabelValues(sbx.GetNamespace(), "failure").Inc()
-		return err
-	}
-	sandboxResumeResponses.WithLabelValues(sbx.GetNamespace(), "success").Inc()
-	sandboxResumeDuration.WithLabelValues(sbx.GetNamespace()).Observe(time.Since(start).Seconds())
-	if err := m.syncRoute(ctx, sbx, true); err != nil {
-		log.Error(err, "failed to sync route with peers after resume")
-	}
-	return nil
+func (m *SandboxManager) ResumeSandbox(ctx context.Context, sbx infra.Sandbox, opts infra.ResumeOptions) error {
+	return m.runPauseResume(ctx, sbx, pauseResumeConfig{
+		spanName:  tracing.SpanManagerResumeSandbox,
+		opName:    "resume",
+		responses: sandboxResumeResponses,
+		duration:  sandboxResumeDuration,
+		op:        func(ctx context.Context) error { return sbx.Resume(ctx, opts) },
+	})
 }
 
 // deleteRouteAndSync removes the route locally and syncs the deletion with peers.

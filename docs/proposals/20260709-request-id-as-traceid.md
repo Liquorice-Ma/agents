@@ -39,9 +39,11 @@ This proposal modifies four aspects of the trace context generation design from
 1. **Root Span creation moved up**: From individual operation functions in `api.go`
    (ClaimSandbox, DeleteSandbox, etc.) to the HTTP middleware layer (`framework.go`),
    centralizing trace lifecycle management.
-2. **Request ID as TraceID**: Use the existing HTTP request ID (UUID) directly as the
-   OTel TraceID, enabling unified trace-log correlation. Implemented via a custom
-   `IDGenerator` without manual span context construction.
+2. **Request ID as TraceID**: Use the HTTP request ID directly as the OTel TraceID,
+   enabling unified trace-log correlation. Server-generated request IDs are emitted
+   directly in the required representation (32 hex characters); caller-provided IDs
+   are validated but never rewritten. Implemented via a custom `IDGenerator` without
+   manual span context construction.
 3. **OTel non-blocking async export**: Confirmed `BatchSpanProcessor` async batch
    export mechanism — enabling tracing does not impact business performance.
 4. **Controller span noise reduction**: Move `StartReconcileSpan` after `shouldRequeue`
@@ -83,7 +85,7 @@ This proposal modifies four aspects of the trace context generation design from
 
 | Dimension | 0702 Design | 0709 Design |
 |-----------|-------------|-------------|
-| TraceID generation | OTel SDK auto-generated | Request ID (UUID without hyphens) as TraceID |
+| TraceID generation | OTel SDK auto-generated | Request ID (32 hex chars) as TraceID |
 | Root Span location | `api.go` per-operation functions | `framework.go` HTTP middleware |
 | `WithRootSpanContext` | Manual call in each operation | Single call in middleware layer |
 | Trace-log correlation | No direct correlation | TraceID = Request ID, direct search |
@@ -101,8 +103,24 @@ business child span creation.
 
 ### Request ID as TraceID
 
-A UUID (v4) without hyphens is 32 hexadecimal characters = 16 bytes, matching the OTel
-TraceID format exactly.
+An OTel TraceID is 16 bytes, canonically rendered as 32 hexadecimal characters.
+The request ID uses this representation directly.
+
+**Request ID lifecycle at the middleware layer** (`framework.go`):
+
+- **Absent `X-Request-ID`**: the server generates the ID directly in the required
+  representation — 32 lowercase hex characters from 16 random bytes
+  (`tracing.NewRequestID`). No conversion or rewriting is ever needed afterwards.
+- **Caller-provided `X-Request-ID`**: the value is **never rewritten** — the
+  API-visible value (response header, error body, logs) is always exactly what the
+  caller sent, regardless of whether tracing is enabled.
+  - Tracing disabled: any non-empty value is accepted as-is (used only for log
+    correlation).
+  - Tracing enabled: the ID doubles as the OTel TraceID, so it must be 32 hex
+    characters and not all-zero (`tracing.IsValidRequestID`). An invalid ID is
+    rejected with **400 Bad Request** instead of being silently replaced; note
+    this also rejects standard hyphenated UUIDs (36 characters) — clients must
+    send the 32-hex form when tracing is on.
 
 **Implementation**: Implement the OTel SDK's `IDGenerator` interface
 (`pkg/tracing/idgenerator.go`). When creating a Root Span, the generator reads the
@@ -116,8 +134,9 @@ parent by the root span, but that parent does not exist). The custom `IDGenerato
 the SDK generate the TraceID internally, so the root span has no parent and this issue
 does not arise.
 
-**Fallback**: When the request ID is not in standard UUID format, the `IDGenerator`
-falls back to a randomly generated TraceID. The span still carries a `request.id`
+**Fallback**: Middleware validation guarantees the request ID is a valid TraceID
+whenever tracing is enabled, so the `IDGenerator` fallback to a random TraceID only
+guards against non-middleware callers. The span always carries a `request.id`
 attribute for searchability.
 
 ### OTel Non-Blocking Async Export
@@ -174,7 +193,8 @@ When troubleshooting:
 
 | Risk | Mitigation |
 |------|------------|
-| Non-standard request ID causes TraceID mismatch | Fallback to OTel auto-generated TraceID; span still carries `request.id` attribute for search |
+| Invalid caller-provided request ID when tracing is enabled | Rejected with 400 (fail fast) instead of silently rewriting the API-visible value; clients see a clear error message |
+| Clients sending hyphenated UUIDs break when tracing is enabled | Documented behavior change; tracing rollout must be coordinated with clients, and tracing-disabled deployments accept any value unchanged |
 | UUID v4 byte order may not match OTel TraceID byte order | Both are 128-bit random values; byte order is irrelevant for unique identification |
 | Hardcoded `sandbox-manager` tracer name in middleware | Acceptable: framework.go already depends on sandbox-manager/logs package |
 

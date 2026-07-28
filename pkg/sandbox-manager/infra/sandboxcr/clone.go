@@ -196,21 +196,7 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 	}
 	if opts.CSIMount != nil {
 		log.Info("starting to perform csi mount")
-		// Trace the CSI mount as a child span; volume count and driver list
-		// are attached afterwards, and EndSpan is called explicitly with the
-		// mount result so the span only covers the mount itself and reflects
-		// its success or failure.
-		csiCtx, csiSpan := tracing.StartManagerSpan(ctx, tracing.SpanInfraProcessCSIMounts)
-		metrics.CSIMount, err = runtime.ProcessCSIMounts(csiCtx, sbx.Sandbox, *opts.CSIMount)
-		var drivers []string
-		for _, m := range opts.CSIMount.MountOptionList {
-			drivers = append(drivers, m.Driver)
-		}
-		csiSpan.SetAttributes(
-			attribute.Int(tracing.AttrCSIVolumeCount, len(opts.CSIMount.MountOptionList)),
-			attribute.StringSlice(tracing.AttrCSIVolumes, drivers),
-		)
-		tracing.EndSpan(csiCtx, csiSpan, err)
+		metrics.CSIMount, err = traceCSIMounts(ctx, sbx.Sandbox, *opts.CSIMount)
 		metrics.Total += metrics.CSIMount
 		if err != nil {
 			log.Error(err, "failed to perform csi mount")

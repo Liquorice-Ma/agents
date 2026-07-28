@@ -90,7 +90,7 @@ const (
 	AttrSnapshotTTL         = "snapshot.ttl"
 	AttrCheckpointDuration  = "checkpoint.duration"
 	AttrCSIVolumeCount      = "csi.volume_count"
-	AttrCSIVolumes          = "csi.volumes"
+	AttrCSIDrivers          = "csi.drivers"
 	AttrRouteID             = "route.id"
 	AttrPeersSynced         = "peers.synced"
 	AttrReuseTriggered      = "reuse.triggered"

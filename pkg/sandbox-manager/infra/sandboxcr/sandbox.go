@@ -190,12 +190,18 @@ func (s *Sandbox) Kill(ctx context.Context) (err error) {
 	defer func() { tracing.EndSpan(ctx, span, err) }()
 
 	// Inject trace context before deletion so the controller's terminating
-	// Reconcile can establish a parent-child trace relationship. Patch failure
-	// is non-fatal: trace loss is acceptable, deletion must proceed.
-	patch := client.MergeFrom(s.Sandbox.DeepCopy())
-	s.Sandbox.Annotations = tracing.InjectTraceContext(ctx, s.Sandbox.Annotations)
-	if err := s.Cache.GetClient().Patch(ctx, s.Sandbox, patch); err != nil {
-		klog.FromContext(ctx).Error(err, "failed to inject trace context before deletion")
+	// Reconcile can establish a parent-child trace relationship. The patched
+	// object is built from a DeepCopy so the shared s.Sandbox is never mutated
+	// (the pointer may be held by cache/singleflight consumers), and the Patch
+	// is skipped entirely when nothing was injected (e.g. tracing disabled).
+	// Patch failure is non-fatal: trace loss is acceptable, deletion must
+	// proceed unconditionally.
+	patched := s.Sandbox.DeepCopy()
+	patched.Annotations = tracing.InjectTraceContext(ctx, patched.Annotations)
+	if patched.Annotations[tracing.TraceContextAnnotationKey] != s.Sandbox.Annotations[tracing.TraceContextAnnotationKey] {
+		if err := s.Cache.GetClient().Patch(ctx, patched, client.MergeFrom(s.Sandbox)); err != nil {
+			klog.FromContext(ctx).Error(err, "failed to inject trace context before deletion")
+		}
 	}
 
 	return DefaultDeleteSandbox(ctx, s.Sandbox, s.Cache.GetClient())

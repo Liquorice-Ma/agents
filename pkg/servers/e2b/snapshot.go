@@ -54,6 +54,11 @@ func (sc *Controller) CreateSnapshot(r *http.Request) (web.ApiResponse[*models.S
 		}
 	}
 	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanManagerCreateSnapshot)
+	// Register EndSpan via defer with a stable operation-error variable so the
+	// span is structurally guaranteed to close on every return path, keeping
+	// this call site consistent with the other manager operations.
+	var err error
+	defer func() { tracing.EndSpan(ctx, span, err) }()
 	// Record optional request extensions as span attributes when present.
 	if request.Extensions.KeepRunning != nil {
 		span.SetAttributes(attribute.Bool(tracing.AttrSnapshotKeepRunning, *request.Extensions.KeepRunning))
@@ -67,8 +72,6 @@ func (sc *Controller) CreateSnapshot(r *http.Request) (web.ApiResponse[*models.S
 		PersistentContents: request.Extensions.PersistentContents,
 		WaitSuccessTimeout: time.Duration(request.Extensions.WaitSuccessSeconds) * time.Second,
 	})
-	// End the span with the checkpoint result so failures are visible in traces.
-	tracing.EndSpan(ctx, span, err)
 	if err != nil {
 		log.Error(err, "failed to create checkpoint")
 		snapshotTotal.WithLabelValues(sbx.GetNamespace(), "failure").Inc()

@@ -22,7 +22,6 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -217,9 +216,11 @@ func StartManagerSpan(ctx context.Context, name string, attrs ...attribute.KeyVa
 //   - err: the error returned by the instrumented operation, nil on success.
 //     The Span status is set to codes.Error with err's message when err is
 //     non-nil, and to codes.Ok otherwise, so failed operations stand out in
-//     trace UIs such as Jaeger. A Kubernetes AlreadyExists error is treated
-//     as success: it means the resource is already in the desired state, so
-//     call sites don't need to special-case it before calling EndSpan.
+//     trace UIs such as Jaeger. EndSpan is policy-neutral about error
+//     classification: benign errors (e.g. an AlreadyExists that a call site
+//     treats as idempotent success) must be normalized to nil by the call
+//     site before calling EndSpan, because the same error can be a genuine
+//     failure elsewhere (e.g. a create name collision).
 //
 // In addition, a Reconcile-scoped Span (one whose context carries the write
 // flag installed by StartReconcileSpan) is marked no-op and dropped by the
@@ -232,11 +233,6 @@ func StartManagerSpan(ctx context.Context, name string, attrs ...attribute.KeyVa
 // Reconcile (e.g. sandbox-manager request handling) carry no write flag and
 // are always exported.
 func EndSpan(ctx context.Context, span trace.Span, err error) {
-	// AlreadyExists means the resource is already in the desired state; treat
-	// it as success so idempotent K8s writes don't show up as failures.
-	if apierrors.IsAlreadyExists(err) {
-		err = nil
-	}
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		// Flag the iteration as failed so this Span and the rest of the

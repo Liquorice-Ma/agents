@@ -23,9 +23,31 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/trace"
 )
+
+func TestInitTracerProvider_UnrecognizedMode_ReturnsError(t *testing.T) {
+	tests := []struct {
+		name string
+		mode TracingMode
+	}{
+		{name: "typo of otel", mode: "otle"},
+		{name: "unknown value", mode: "jaeger"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			shutdown, err := InitTracerProvider(context.Background(), Config{
+				Mode:        tt.mode,
+				ServiceName: "test-service",
+			})
+			require.Error(t, err, "unrecognized mode must fail fast instead of silently disabling tracing")
+			assert.Contains(t, err.Error(), "unrecognized tracing mode")
+			assert.Nil(t, shutdown)
+		})
+	}
+}
 
 func TestInitTracerProvider_Disabled(t *testing.T) {
 	prevTP := otel.GetTracerProvider()

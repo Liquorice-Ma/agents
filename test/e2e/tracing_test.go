@@ -42,12 +42,15 @@ const (
 	controllerContainerName  = "manager"
 )
 
-// The Tracing Stdout suite verifies the OTel tracing pipeline end to end using
-// the "std" exporter: spans emitted by the controller during a Sandbox
-// lifecycle must appear on the controller's stdout, correlated by the trace ID
-// propagated through the trace-context annotation. It requires the controller
-// to run with --tracing-mode=std and skips itself otherwise, so it is a no-op
-// in workflows that don't enable tracing.
+// The Tracing Stdout suite verifies the controller-side half of the tracing
+// pipeline using the "std" exporter: trace-context extraction from the CR
+// annotation and span export on the controller's stdout. The traceparent is
+// constructed by the test itself to simulate the annotation a sandbox-manager
+// would inject; the manager → CR annotation → controller chain and the
+// requestID == TraceID contract are NOT covered here (the workflow deploys
+// only the controller). It requires the controller to run with
+// --tracing-mode=std and skips itself otherwise, so it is a no-op in
+// workflows that don't enable tracing.
 var _ = Describe("Tracing Stdout", func() {
 	var (
 		ctx       = context.Background()
@@ -73,8 +76,8 @@ var _ = Describe("Tracing Stdout", func() {
 		}
 	})
 
-	It("should export controller spans to stdout with the propagated trace ID", func() {
-		By("Building a W3C traceparent simulating a sandbox-manager root span")
+	It("should extract trace context from the annotation and export controller spans to stdout", func() {
+		By("Building a W3C traceparent simulating the annotation a sandbox-manager would inject")
 		traceID := randomHex(16)
 		parentSpanID := randomHex(8)
 		traceparent := fmt.Sprintf("00-%s-%s-01", traceID, parentSpanID)
@@ -125,8 +128,9 @@ var _ = Describe("Tracing Stdout", func() {
 			g.Expect(logs).To(ContainSubstring(`"Name": "` + tracing.SpanControllerReconcile + `"`))
 			g.Expect(logs).To(ContainSubstring(`"Name": "` + tracing.SpanControllerCreatePod + `"`))
 			g.Expect(logs).To(ContainSubstring(`"Name": "` + tracing.SpanControllerUpdateStatus + `"`))
-			// Spans triggered by this sandbox must carry the trace ID from the
-			// annotation, proving trace-context propagation works end to end.
+			// Spans triggered by this sandbox must carry the trace ID extracted
+			// from the annotation, proving controller-side trace-context
+			// extraction works.
 			g.Expect(logs).To(ContainSubstring(`"TraceID": "` + traceID + `"`))
 		}, time.Minute*2, time.Second*5).Should(Succeed())
 	})

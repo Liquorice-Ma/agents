@@ -135,9 +135,14 @@ func (c *PodControl) CreatePod(ctx context.Context, args CreatePodArgs) (*corev1
 	if pod.Name != "" {
 		span.SetAttributes(attribute.String(tracing.AttrPodName, pod.Name))
 	}
-	// AlreadyExists is treated as success inside EndSpan (the pod is already
-	// in the desired state), so no special-casing is needed here.
-	tracing.EndSpan(ctx, span, err)
+	// AlreadyExists is an idempotent success here (the pod is already in the
+	// desired state), so normalize it at this call site; EndSpan itself is
+	// policy-neutral because AlreadyExists is a genuine failure elsewhere.
+	if errors.IsAlreadyExists(err) {
+		tracing.EndSpan(ctx, span, nil)
+	} else {
+		tracing.EndSpan(ctx, span, err)
+	}
 	if err != nil {
 		ScaleExpectation.ObserveScale(GetControllerKey(box), expectations.Create, box.Name)
 		if !errors.IsAlreadyExists(err) {

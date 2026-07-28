@@ -31,6 +31,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/api/validate/content"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
@@ -63,6 +64,11 @@ var errSandboxCreateNotAttempted = errors.New("sandbox create not attempted")
 func ValidateAndInitClaimOptions(opts infra.ClaimSandboxOptions) (infra.ClaimSandboxOptions, error) {
 	if opts.User == "" {
 		return infra.ClaimSandboxOptions{}, fmt.Errorf("user is required")
+	}
+	// Owner is also synced to a pod label (AnnotationOwner key). Annotation
+	// values are unrestricted but label values are not, so reject early.
+	if errs := content.IsLabelValue(opts.User); len(errs) > 0 {
+		return infra.ClaimSandboxOptions{}, fmt.Errorf("invalid owner %q for pod label %s: %s", opts.User, v1alpha1.AnnotationOwner, strings.Join(errs, "; "))
 	}
 	if opts.Template == "" {
 		return infra.ClaimSandboxOptions{}, fmt.Errorf("template is required")
@@ -378,20 +384,7 @@ func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType infra.Loc
 	if opts.CSIMount != nil {
 		log.Info("starting to perform csi mount")
 		var err error
-		// Trace the CSI mount as a child span; volume count and driver list
-		// are attached afterwards, and End() is called explicitly so the span
-		// only covers the mount itself.
-		csiCtx, csiSpan := tracing.StartManagerSpan(ctx, tracing.SpanInfraProcessCSIMounts)
-		metrics.CSIMount, err = runtime.ProcessCSIMounts(csiCtx, sbx.Sandbox, *opts.CSIMount)
-		var drivers []string
-		for _, m := range opts.CSIMount.MountOptionList {
-			drivers = append(drivers, m.Driver)
-		}
-		csiSpan.SetAttributes(
-			attribute.Int(tracing.AttrCSIVolumeCount, len(opts.CSIMount.MountOptionList)),
-			attribute.StringSlice(tracing.AttrCSIVolumes, drivers),
-		)
-		tracing.EndSpan(csiCtx, csiSpan, err)
+		metrics.CSIMount, err = traceCSIMounts(ctx, sbx.Sandbox, *opts.CSIMount)
 		if err != nil {
 			log.Error(err, "failed to perform csi mount")
 			return fmt.Errorf("failed to perform csi mount: %s", err)
@@ -779,6 +772,16 @@ func performLockSandbox(ctx context.Context, sbx *Sandbox, lockType infra.LockTy
 	log := klog.FromContext(ctx)
 	c := cache.GetClient()
 	utils.LockSandbox(sbx.Sandbox, opts.LockString, opts.User)
+	// Sync owner onto the pod template as a label so selectors/policies can
+	// match it. Reuse AnnotationOwner as the label key so the value stays
+	// aligned with the sandbox owner annotation written by LockSandbox.
+	// opts.User was validated as a label value in ValidateAndInitClaimOptions.
+	podLabels := sbx.GetPodLabels()
+	if podLabels == nil {
+		podLabels = make(map[string]string, 1)
+	}
+	podLabels[v1alpha1.AnnotationOwner] = opts.User
+	sbx.SetPodLabels(podLabels)
 	var updated *v1alpha1.Sandbox
 	var err error
 	if lockType == infra.LockTypeCreate {

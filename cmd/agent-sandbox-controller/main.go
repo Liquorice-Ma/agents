@@ -133,17 +133,10 @@ func main() {
 		"Buffer size for the sandbox metric GC controller event channel. "+
 			"Sends that would block are counted under sandbox_metrics_gc_dropped_total{reason=\"channel_full\"}.")
 
-	// Tracing flags
-	var tracingMode string
-	var tracingEndpoint string
-	var tracingInsecure bool
-	var tracingSamplingRatio float64
-	var tracingFilePath string
-	flag.StringVar(&tracingMode, "tracing-mode", "none", "Tracing mode: otel, std, file, none")
-	flag.StringVar(&tracingEndpoint, "tracing-endpoint", tracing.DefaultEndpoint, "OTLP gRPC endpoint for tracing export")
-	flag.Float64Var(&tracingSamplingRatio, "tracing-sampling-ratio", 1.0, "Trace sampling ratio (0.0 to 1.0)")
-	flag.BoolVar(&tracingInsecure, "tracing-insecure", false, "Use insecure gRPC for tracing export (dev environment)")
-	flag.StringVar(&tracingFilePath, "tracing-file", "", "Output file path for tracing export (file mode)")
+	// Tracing flags (definitions shared with sandbox-manager via
+	// tracing.Config.BindFlags)
+	var tracingCfg tracing.Config
+	tracingCfg.BindFlags(flag.CommandLine)
 
 	opts := zap.Options{
 		Development: true,
@@ -265,14 +258,8 @@ func main() {
 	setupLog.Info("setup client", "qps", clientQPS, "burst", clientBurst)
 
 	// Initialize tracing
-	tracingShutdown, err := tracing.InitTracerProvider(context.Background(), tracing.Config{
-		Mode:          tracing.TracingMode(tracingMode),
-		Endpoint:      tracingEndpoint,
-		FilePath:      tracingFilePath,
-		ServiceName:   "sandbox-controller",
-		SamplingRatio: tracingSamplingRatio,
-		Insecure:      tracingInsecure,
-	})
+	tracingCfg.ServiceName = "sandbox-controller"
+	tracingShutdown, err := tracing.InitTracerProvider(context.Background(), tracingCfg)
 	if err != nil {
 		setupLog.Error(err, "unable to initialize tracing")
 		os.Exit(1)

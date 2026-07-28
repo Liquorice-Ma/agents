@@ -140,17 +140,10 @@ func main() {
 	pflag.DurationVar(&quotaAntiDriftInterval, "quota-anti-drift-interval", consts.DefaultQuotaAntiDriftInterval, "Interval for quota anti-drift reconciliation.")
 	pflag.DurationVar(&quotaAntiDriftGrace, "quota-anti-drift-grace", consts.DefaultQuotaAntiDriftGrace, "Grace period before periodic quota anti-drift releases suspected leaked entries.")
 
-	// Tracing flags
-	var tracingMode string
-	var tracingEndpoint string
-	var tracingInsecure bool
-	var tracingSamplingRatio float64
-	var tracingFilePath string
-	pflag.StringVar(&tracingMode, "tracing-mode", "none", "Tracing mode: otel, std, file, none")
-	pflag.StringVar(&tracingEndpoint, "tracing-endpoint", tracing.DefaultEndpoint, "OTLP gRPC endpoint for tracing export")
-	pflag.Float64Var(&tracingSamplingRatio, "tracing-sampling-ratio", 1.0, "Trace sampling ratio (0.0 to 1.0)")
-	pflag.BoolVar(&tracingInsecure, "tracing-insecure", false, "Use insecure gRPC for tracing export (dev environment)")
-	pflag.StringVar(&tracingFilePath, "tracing-file", "", "Output file path for tracing export (file mode)")
+	// Tracing flags (definitions shared with agent-sandbox-controller via
+	// tracing.Config.BindFlags; pulled into pflag by AddGoFlagSet below)
+	var tracingCfg tracing.Config
+	tracingCfg.BindFlags(flag.CommandLine)
 
 	opts := zap.Options{
 		Development: false,
@@ -262,14 +255,8 @@ func main() {
 	}
 
 	// Initialize tracing
-	tracingShutdown, err := tracing.InitTracerProvider(context.Background(), tracing.Config{
-		Mode:          tracing.TracingMode(tracingMode),
-		Endpoint:      tracingEndpoint,
-		FilePath:      tracingFilePath,
-		ServiceName:   "sandbox-manager",
-		SamplingRatio: tracingSamplingRatio,
-		Insecure:      tracingInsecure,
-	})
+	tracingCfg.ServiceName = "sandbox-manager"
+	tracingShutdown, err := tracing.InitTracerProvider(context.Background(), tracingCfg)
 	if err != nil {
 		klog.Fatalf("Failed to initialize tracing: %v", err)
 	}

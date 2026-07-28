@@ -132,13 +132,13 @@ func Initialize(ctx context.Context, box *agentsv1alpha1.Sandbox, newStatus *age
 		// Cleanup ProcessCSIMounts for concurrent mount execution
 		// Trace the CSI remount as a child span, recording the volume count
 		// and driver list as attributes for troubleshooting slow mounts.
-		var drivers []string
-		for _, m := range mountOptionList {
-			drivers = append(drivers, m.Driver)
+		drivers := make([]string, len(mountOptionList))
+		for i, m := range mountOptionList {
+			drivers[i] = m.Driver
 		}
 		csiCtx, csiSpan := tracing.StartControllerSpan(ctx, tracing.SpanControllerProcessCSIMounts,
 			attribute.Int(tracing.AttrCSIVolumeCount, len(mountOptionList)),
-			attribute.StringSlice(tracing.AttrCSIVolumes, drivers),
+			attribute.StringSlice(tracing.AttrCSIDrivers, drivers),
 		)
 		duration, mountErr := utilruntime.ProcessCSIMounts(csiCtx, sbxForInit, config.CSIMountOptions{
 			MountOptionList: mountOptionList,
