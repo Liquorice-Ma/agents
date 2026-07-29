@@ -93,19 +93,39 @@ func TestInitTracerProvider_Enabled(t *testing.T) {
 	assert.NoError(t, err, "shutdown should not error")
 }
 
-func TestInitTracerProvider_EnabledWithDefaultSamplingRatio(t *testing.T) {
-	prevTP := otel.GetTracerProvider()
-	defer func() { otel.SetTracerProvider(prevTP) }()
+func TestInitTracerProvider_SamplingRatioContract(t *testing.T) {
+	tests := []struct {
+		name        string
+		ratio       float64
+		expectError string
+	}{
+		{name: "zero is valid and means sample nothing", ratio: 0, expectError: ""},
+		{name: "one is valid and means sample everything", ratio: 1, expectError: ""},
+		{name: "negative is a configuration error", ratio: -0.1, expectError: "invalid tracing sampling ratio"},
+		{name: "greater than one is a configuration error", ratio: 1.5, expectError: "invalid tracing sampling ratio"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prevTP := otel.GetTracerProvider()
+			defer func() { otel.SetTracerProvider(prevTP) }()
 
-	shutdown, err := InitTracerProvider(context.Background(), Config{
-		Mode:          TracingModeOTel,
-		Endpoint:      "localhost:4317",
-		ServiceName:   "test-service",
-		SamplingRatio: 0, // Should default to 1.0
-		Insecure:      true,
-	})
-	assert.NoError(t, err, "should not error with zero sampling ratio")
-	defer func() { _ = shutdown(context.Background()) }()
+			shutdown, err := InitTracerProvider(context.Background(), Config{
+				Mode:          TracingModeOTel,
+				Endpoint:      "localhost:4317",
+				ServiceName:   "test-service",
+				SamplingRatio: tt.ratio,
+				Insecure:      true,
+			})
+			if tt.expectError != "" {
+				require.Error(t, err, "out-of-range ratio must fail fast")
+				assert.Contains(t, err.Error(), tt.expectError)
+				assert.Nil(t, shutdown)
+				return
+			}
+			require.NoError(t, err, "in-range ratio must be accepted as-is")
+			defer func() { _ = shutdown(context.Background()) }()
+		})
+	}
 }
 
 func TestTracer_NotInitialized(t *testing.T) {
@@ -200,10 +220,13 @@ func TestInitTracerProvider_FileMode(t *testing.T) {
 	err = shutdown(context.Background())
 	assert.NoError(t, err, "shutdown should not error")
 
-	// Verify the file was created and contains span data.
+	// Verify the file was created and contains span data. The file holds
+	// identifying data (request IDs, sandbox names), so it must be owner-only.
 	info, statErr := os.Stat(tmpFile)
 	assert.NoError(t, statErr, "trace file should exist")
 	assert.Greater(t, info.Size(), int64(0), "trace file should not be empty")
+	assert.Equal(t, os.FileMode(0600), info.Mode().Perm(),
+		"trace file should be created with owner-only permissions")
 }
 
 func TestInitTracerProvider_FileMode_EmptyPath(t *testing.T) {

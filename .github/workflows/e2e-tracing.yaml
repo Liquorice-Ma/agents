@@ -41,6 +41,9 @@ jobs:
           export IMAGE="agent-sandbox-controller:latest"
           docker build -f dockerfiles/agent-sandbox-controller.Dockerfile  --pull --no-cache . -t $IMAGE
           kind load docker-image --name=${KIND_CLUSTER_NAME} $IMAGE || { echo >&2 "kind not installed or error loading image: $IMAGE"; exit 1; }
+          export MANAGER_IMAGE="sandbox-manager:latest"
+          docker build -f dockerfiles/sandbox-manager.Dockerfile --pull . -t $MANAGER_IMAGE
+          kind load docker-image --name=${KIND_CLUSTER_NAME} $MANAGER_IMAGE || { echo >&2 "kind not installed or error loading image: $MANAGER_IMAGE"; exit 1; }
       - name: Install Kruise Agents with stdout tracing
         run: |
           CONTROLLER_IMG=agent-sandbox-controller:latest make deploy-agent-sandbox-controller
@@ -54,7 +57,41 @@ jobs:
           # and can falsely pass by seeing the OLD (pre-patch) pod.
           kubectl -n sandbox-system rollout status deployment/sandbox-controller-manager --timeout=120s
           bash hack/wait-agent-sandbox-controller.sh
+      - name: Install sandbox-manager with stdout tracing
+        run: |
+          # Enable the std tracing exporter on the manager as well so the
+          # Tracing Full Chain E2E suite can assert on both stdouts. Reduce
+          # resource requests to fit the CI runner.
+          {
+            echo ""
+            echo "# Enable stdout tracing for the Tracing Full Chain E2E suite"
+            echo "- op: add"
+            echo "  path: /spec/template/spec/containers/0/args/-"
+            echo "  value: --tracing-mode=std"
+            echo "- op: replace"
+            echo "  path: /spec/template/spec/containers/0/resources/requests"
+            printf '  value: {"cpu":"100m","memory":"256Mi"}\n'
+            echo "- op: replace"
+            echo "  path: /spec/template/spec/containers/1/resources/requests"
+            printf '  value: {"cpu":"50m","memory":"128Mi"}\n'
+          } >> config/sandbox-manager/configuration_patch.yaml
+          make deploy-sandbox-manager
+          kubectl -n sandbox-system rollout status deployment/sandbox-manager --timeout=300s
+      - name: Port-forward sandbox-manager
+        run: |
+          # Expose the manager E2B API to the runner for the Tracing Full
+          # Chain suite. Redirect output so the step does not hang waiting
+          # for the background process; it keeps running across steps.
+          nohup kubectl -n sandbox-system port-forward svc/sandbox-manager 7788:7788 >/tmp/port-forward.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:7788/health >/dev/null; then
+              echo "sandbox-manager is reachable"; break
+            fi
+            sleep 2
+          done
+          curl -sf http://localhost:7788/health >/dev/null || { cat /tmp/port-forward.log; echo >&2 "sandbox-manager not reachable via port-forward"; exit 1; }
       - name: Run Tracing E2E Tests
         run: |
           export KUBECONFIG=/home/runner/.kube/config
-          hack/run-agents-e2e-test.sh --print-info --focus 'Tracing Stdout'
+          export TRACING_E2E_MANAGER_URL=http://localhost:7788
+          hack/run-agents-e2e-test.sh --print-info --focus 'Tracing'

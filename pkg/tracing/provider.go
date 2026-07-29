@@ -77,7 +77,7 @@ type Config struct {
 	Endpoint      string  // OTLP gRPC endpoint, e.g., "otel-collector:4317"
 	FilePath      string  // Output file path for "file" mode, e.g., "/tmp/traces.json"
 	ServiceName   string  // e.g., "sandbox-controller" or "sandbox-manager"
-	SamplingRatio float64 // 0.0 to 1.0, default 1.0
+	SamplingRatio float64 // 0.0 to 1.0; 0 disables sampling, 1 samples everything
 	Insecure      bool    // Use insecure gRPC (dev environment)
 }
 
@@ -89,7 +89,7 @@ type Config struct {
 func (c *Config) BindFlags(fs *flag.FlagSet) {
 	fs.StringVar((*string)(&c.Mode), "tracing-mode", string(TracingModeNone), "Tracing mode: otel, std, file, none")
 	fs.StringVar(&c.Endpoint, "tracing-endpoint", DefaultEndpoint, "OTLP gRPC endpoint for tracing export")
-	fs.Float64Var(&c.SamplingRatio, "tracing-sampling-ratio", 1.0, "Trace sampling ratio (0.0 to 1.0)")
+	fs.Float64Var(&c.SamplingRatio, "tracing-sampling-ratio", 1.0, "Trace sampling ratio within [0, 1]; 0 samples nothing, 1 samples everything")
 	fs.BoolVar(&c.Insecure, "tracing-insecure", false, "Use insecure gRPC for tracing export (dev environment)")
 	fs.StringVar(&c.FilePath, "tracing-file", "", "Output file path for tracing export (file mode)")
 }
@@ -110,9 +110,12 @@ func (c *Config) BindFlags(fs *flag.FlagSet) {
 // have registered a real provider, and to install the W3C TraceContext
 // propagator so that Inject/Extract calls are safe.
 func InitTracerProvider(ctx context.Context, cfg Config) (func(context.Context) error, error) {
-	// Set default sampling ratio.
-	if cfg.SamplingRatio <= 0 {
-		cfg.SamplingRatio = 1.0
+	// Validate the sampling ratio. An explicit 0 means "sample nothing" and
+	// must be honored rather than treated as "unset"; out-of-range values are
+	// a configuration error instead of being silently clamped. The default of
+	// 1.0 is supplied by BindFlags, not here.
+	if cfg.SamplingRatio < 0 || cfg.SamplingRatio > 1 {
+		return nil, fmt.Errorf("invalid tracing sampling ratio %g: must be within [0, 1]", cfg.SamplingRatio)
 	}
 
 	// Create the span exporter according to the tracing mode.
@@ -129,11 +132,15 @@ func InitTracerProvider(ctx context.Context, cfg Config) (func(context.Context) 
 			return nil, fmt.Errorf("failed to create stdout exporter: %w", err)
 		}
 	case TracingModeFile:
-		// Export spans to a file for persistent local debugging.
+		// Export spans to a file for persistent local debugging. The output
+		// is an appended stream of pretty-printed JSON objects (one per
+		// exported span), not a single valid JSON document. Traces carry
+		// identifying data (request IDs, sandbox names, namespaces), so the
+		// file is created owner-only (0600).
 		if cfg.FilePath == "" {
 			return nil, fmt.Errorf("tracing file path is required for file mode")
 		}
-		fileWriter, err = os.OpenFile(cfg.FilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		fileWriter, err = os.OpenFile(cfg.FilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 		if err != nil {
 			return nil, fmt.Errorf("failed to open tracing file %q: %w", cfg.FilePath, err)
 		}
@@ -192,12 +199,15 @@ func InitTracerProvider(ctx context.Context, cfg Config) (func(context.Context) 
 	// processor. The filter drops Reconcile Spans marked no-op (no write
 	// operation), keeping empty Reconcile iterations out of exported traces.
 	// Use custom RequestIDGenerator so that TraceID equals the request ID,
-	// enabling unified trace-log correlation.
+	// enabling unified trace-log correlation. Sampling uses randomRatioSampler
+	// rather than TraceIDRatioBased: since the TraceID is the caller-supplied
+	// request ID, a TraceID-derived decision would let callers pick IDs that
+	// are always sampled (see sampler.go).
 	batcher := sdktrace.NewBatchSpanProcessor(exporter)
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithSpanProcessor(NewFilteringSpanProcessor(batcher)),
 		sdktrace.WithResource(res),
-		sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(cfg.SamplingRatio))),
+		sdktrace.WithSampler(sdktrace.ParentBased(randomRatioSampler{ratio: cfg.SamplingRatio})),
 		sdktrace.WithIDGenerator(&RequestIDGenerator{}),
 	)
 

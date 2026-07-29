@@ -21,7 +21,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -47,10 +46,10 @@ const (
 // annotation and span export on the controller's stdout. The traceparent is
 // constructed by the test itself to simulate the annotation a sandbox-manager
 // would inject; the manager → CR annotation → controller chain and the
-// requestID == TraceID contract are NOT covered here (the workflow deploys
-// only the controller). It requires the controller to run with
-// --tracing-mode=std and skips itself otherwise, so it is a no-op in
-// workflows that don't enable tracing.
+// requestID == TraceID contract are covered by the Tracing Full Chain suite
+// (tracing_chain_test.go), which requires a deployed sandbox-manager. This
+// suite requires the controller to run with --tracing-mode=std and skips
+// itself otherwise, so it is a no-op in workflows that don't enable tracing.
 var _ = Describe("Tracing Stdout", func() {
 	var (
 		ctx       = context.Background()
@@ -124,7 +123,7 @@ var _ = Describe("Tracing Stdout", func() {
 		// exporter pretty-prints spans as JSON, hence the `"Name": "..."`
 		// assertions below cannot collide with regular klog output.
 		Eventually(func(g Gomega) {
-			logs := controllerLogs(ctx)
+			logs := podLogs(ctx, controllerNamespace, controllerPodSelector, controllerContainerName)
 			g.Expect(logs).To(ContainSubstring(`"Name": "` + tracing.SpanControllerReconcile + `"`))
 			g.Expect(logs).To(ContainSubstring(`"Name": "` + tracing.SpanControllerCreatePod + `"`))
 			g.Expect(logs).To(ContainSubstring(`"Name": "` + tracing.SpanControllerUpdateStatus + `"`))
@@ -156,23 +155,4 @@ func randomHex(n int) string {
 	_, err := rand.Read(b)
 	Expect(err).NotTo(HaveOccurred())
 	return hex.EncodeToString(b)
-}
-
-// controllerLogs returns the concatenated stdout of all controller manager
-// pods, where the std tracing exporter writes its spans.
-func controllerLogs(ctx context.Context) string {
-	pods, err := clientset.CoreV1().Pods(controllerNamespace).List(ctx, metav1.ListOptions{
-		LabelSelector: controllerPodSelector,
-	})
-	Expect(err).NotTo(HaveOccurred())
-	Expect(pods.Items).NotTo(BeEmpty(), "no controller manager pods found")
-	var sb strings.Builder
-	for i := range pods.Items {
-		raw, err := clientset.CoreV1().Pods(controllerNamespace).
-			GetLogs(pods.Items[i].Name, &corev1.PodLogOptions{Container: controllerContainerName}).
-			DoRaw(ctx)
-		Expect(err).NotTo(HaveOccurred())
-		sb.Write(raw)
-	}
-	return sb.String()
 }

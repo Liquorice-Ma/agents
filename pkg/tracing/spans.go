@@ -45,9 +45,13 @@ const (
 	SpanControllerEnsureSandboxPaused   = "controller.EnsureSandboxPaused"
 	SpanControllerEnsureSandboxResumed  = "controller.EnsureSandboxResumed"
 	SpanControllerEnsureSandboxUpgraded = "controller.EnsureSandboxUpgraded"
+	SpanControllerEnsureSandboxRecycled = "controller.EnsureSandboxRecycled"
 	SpanControllerCreatePod             = "controller.CreatePod"
 	SpanControllerDeletePod             = "controller.DeletePod"
 	SpanControllerPatchPod              = "controller.PatchPod"
+	SpanControllerCreatePVC             = "controller.CreatePVC"
+	SpanControllerPatchSandbox          = "controller.PatchSandbox"
+	SpanControllerDeleteSandbox         = "controller.DeleteSandbox"
 	SpanControllerRemoveFinalizer       = "controller.RemoveFinalizer"
 	SpanControllerCheckpoint            = "controller.Checkpoint"
 	SpanControllerProcessCSIMounts      = "controller.ProcessCSIMounts"
@@ -109,6 +113,9 @@ var writeSpanNames = map[string]bool{
 	SpanControllerCreatePod:        true,
 	SpanControllerDeletePod:        true,
 	SpanControllerPatchPod:         true,
+	SpanControllerCreatePVC:        true,
+	SpanControllerPatchSandbox:     true,
+	SpanControllerDeleteSandbox:    true,
 	SpanControllerRemoveFinalizer:  true,
 	SpanControllerCheckpoint:       true,
 	SpanControllerProcessCSIMounts: true,

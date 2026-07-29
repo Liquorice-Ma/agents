@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net/http"
 	"runtime"
+	"strings"
 	"time"
 
 	"k8s.io/klog/v2"
@@ -75,16 +76,27 @@ func RegisterRoute[T any](mux *http.ServeMux, method, path string, handler Handl
 			// required by the tracing scheme (32 hex chars, usable as an OTel
 			// TraceID as-is), so caller-visible values never need rewriting.
 			requestID = tracing.NewRequestID()
+		} else if tracing.Enabled() {
+			// The request ID doubles as the OTel TraceID, whose canonical
+			// string form is lowercase hex. Lowercase the caller-provided
+			// value so the request ID string in logs, headers and error
+			// bodies compares equal to the TraceID string in trace backends;
+			// the ID bytes are unchanged.
+			requestID = strings.ToLower(requestID)
 		}
 		// Derive context from request context to inherit cancellation when client disconnects
 		ctx := logs.NewContextFrom(r.Context(),
 			"requestID", requestID, "api", fmt.Sprintf("%s %s", method, path))
 		log := klog.FromContext(ctx)
 
-		// A caller-provided X-Request-ID is never rewritten. When tracing is
-		// enabled the request ID doubles as the OTel TraceID, so an ID that
-		// cannot serve as one is rejected with 400 instead of being silently
-		// replaced.
+		// A caller-provided X-Request-ID is never replaced (only
+		// case-normalized above). When tracing is enabled the request ID
+		// doubles as the OTel TraceID, so an ID that cannot serve as one is
+		// rejected with 400 instead of being silently replaced. Known
+		// limitation: a caller reusing the same X-Request-ID across
+		// independent requests makes them share one TraceID; the configured
+		// sampling rate is unaffected because the sampling decision uses a
+		// server-side random draw (see pkg/tracing/sampler.go).
 		if tracing.Enabled() && !tracing.IsValidRequestID(requestID) {
 			safeWriteJson(ctx, w, http.StatusBadRequest, http.StatusBadRequest, &ApiError{
 				Code:    http.StatusBadRequest,

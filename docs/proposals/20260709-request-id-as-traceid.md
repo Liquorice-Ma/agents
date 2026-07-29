@@ -41,9 +41,10 @@ This proposal modifies four aspects of the trace context generation design from
    centralizing trace lifecycle management.
 2. **Request ID as TraceID**: Use the HTTP request ID directly as the OTel TraceID,
    enabling unified trace-log correlation. Server-generated request IDs are emitted
-   directly in the required representation (32 hex characters); caller-provided IDs
-   are validated but never rewritten. Implemented via a custom `IDGenerator` without
-   manual span context construction.
+   directly in the required representation (32 lowercase hex characters);
+   caller-provided IDs are validated and never replaced (only case-normalized to
+   the canonical TraceID form when tracing is enabled). Implemented via a custom
+   `IDGenerator` without manual span context construction.
 3. **OTel non-blocking async export**: Confirmed `BatchSpanProcessor` async batch
    export mechanism — enabling tracing does not impact business performance.
 4. **Controller span noise reduction**: Move `StartReconcileSpan` after `shouldRequeue`
@@ -111,16 +112,33 @@ The request ID uses this representation directly.
 - **Absent `X-Request-ID`**: the server generates the ID directly in the required
   representation — 32 lowercase hex characters from 16 random bytes
   (`tracing.NewRequestID`). No conversion or rewriting is ever needed afterwards.
-- **Caller-provided `X-Request-ID`**: the value is **never rewritten** — the
-  API-visible value (response header, error body, logs) is always exactly what the
-  caller sent, regardless of whether tracing is enabled.
-  - Tracing disabled: any non-empty value is accepted as-is (used only for log
+- **Caller-provided `X-Request-ID`**: the value is **never replaced** — the
+  API-visible value (response header, error body, logs) is the caller's own ID,
+  at most case-normalized.
+  - Tracing disabled: any non-empty value is accepted verbatim (used only for log
     correlation).
   - Tracing enabled: the ID doubles as the OTel TraceID, so it must be 32 hex
     characters and not all-zero (`tracing.IsValidRequestID`). An invalid ID is
     rejected with **400 Bad Request** instead of being silently replaced; note
     this also rejects standard hyphenated UUIDs (36 characters) — clients must
-    send the 32-hex form when tracing is on.
+    send the 32-hex form when tracing is on. Accepted IDs are lowercased to the
+    canonical TraceID string form (the ID bytes are unchanged) so the request ID
+    string in logs and headers compares equal to the TraceID string shown by
+    trace backends.
+
+**Sampling**: because the TraceID equals the caller-supplied request ID, the
+decision must not be derived from the TraceID — otherwise a caller could pick
+IDs that are always sampled, and the configured ratio would no longer bound
+telemetry volume. The provider therefore samples root spans with a
+server-side random draw (`pkg/tracing/sampler.go`) instead of the SDK's
+`TraceIDRatioBased`. `--tracing-sampling-ratio` accepts `[0, 1]`, where an
+explicit `0` means "sample nothing"; out-of-range values fail startup.
+
+**Known limitation**: a client that reuses the same `X-Request-ID` across
+independent requests makes those requests share a single TraceID (their spans
+appear in one trace). The sampling rate is unaffected. Clients that need
+distinct trace identities must send a fresh request ID per request, or omit the
+header and let the server generate one.
 
 **Implementation**: Implement the OTel SDK's `IDGenerator` interface
 (`pkg/tracing/idgenerator.go`). When creating a Root Span, the generator reads the
@@ -195,6 +213,8 @@ When troubleshooting:
 |------|------------|
 | Invalid caller-provided request ID when tracing is enabled | Rejected with 400 (fail fast) instead of silently rewriting the API-visible value; clients see a clear error message |
 | Clients sending hyphenated UUIDs break when tracing is enabled | Documented behavior change; tracing rollout must be coordinated with clients, and tracing-disabled deployments accept any value unchanged |
+| Caller-controlled TraceID could skew probabilistic sampling | The sampling decision uses a server-side random draw instead of the TraceID (`pkg/tracing/sampler.go`), so the configured ratio remains a reliable bound regardless of the IDs callers send |
+| Reused request IDs collapse independent requests into one trace | Documented client contract: send a fresh ID per request or omit the header; sampling and correctness are unaffected |
 | UUID v4 byte order may not match OTel TraceID byte order | Both are 128-bit random values; byte order is irrelevant for unique identification |
 | Hardcoded `sandbox-manager` tracer name in middleware | Acceptable: framework.go already depends on sandbox-manager/logs package |
 

@@ -271,11 +271,14 @@ func (r *commonControl) EnsureSandboxPaused(ctx context.Context, args EnsureFunc
 	// Validate images and create pod-info checkpoint before deletion. Traced
 	// so checkpoint validation latency is observable in Jaeger; the span is
 	// read-mostly and the actual checkpoint creation inside is traced (and
-	// write-marked) by SpanControllerCheckpoint.
-	ctx, cpSpan := tracing.StartControllerSpan(ctx, tracing.SpanControllerAssumePodCheckpointed)
-	rejected := r.checkpointControl.AssumePodCheckpointed(ctx, pod, box, newStatus, cond)
+	// write-marked) by SpanControllerCheckpoint. Use a local context so the
+	// following DeletePod span stays a sibling: it must not parent under a
+	// span that has already ended and may be dropped as no-op, which would
+	// produce a missing-parent trace.
+	cpCtx, cpSpan := tracing.StartControllerSpan(ctx, tracing.SpanControllerAssumePodCheckpointed)
+	rejected := r.checkpointControl.AssumePodCheckpointed(cpCtx, pod, box, newStatus, cond)
 	cpSpan.SetAttributes(attribute.Bool(tracing.AttrCheckpointRejected, rejected))
-	tracing.EndSpan(ctx, cpSpan, nil)
+	tracing.EndSpan(cpCtx, cpSpan, nil)
 	if rejected {
 		return nil
 	}

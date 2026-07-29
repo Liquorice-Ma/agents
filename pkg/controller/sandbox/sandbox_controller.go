@@ -255,6 +255,21 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 		box.Annotations = map[string]string{}
 	}
 
+	// Create the Reconcile span before the first operation that may write
+	// resources or fail (PVC ensure, hash annotation, timers, status update),
+	// so those operations are covered by the trace. Iterations that turn out
+	// to be pure reads are dropped by FilteringSpanProcessor, so starting the
+	// span this early does not produce noise.
+	ctx, reconcileSpan := tracing.StartReconcileSpan(ctx, box)
+	reconcileSpan.SetAttributes(attribute.String(tracing.AttrSandboxPhase, string(box.Status.Phase)))
+	if traceID := tracing.TraceIDFromContext(ctx); traceID != "" {
+		ctx = klog.NewContext(ctx, klog.FromContext(ctx).WithValues("traceID", traceID))
+	}
+	// End the Reconcile span with the final Reconcile error via defer: a
+	// failing iteration is marked failed and always retained even when the
+	// error path is not wrapped in its own child span.
+	defer func() { tracing.EndSpan(ctx, reconcileSpan, err) }()
+
 	// Process VolumeClaimTemplates for persistent data recovery during sleep/wake operations
 	if err := r.ensureVolumeClaimTemplates(ctx, box); err != nil {
 		klog.FromContext(ctx).Error(err, "failed to ensure volume claim templates", "sandbox", klog.KObj(box))
@@ -265,17 +280,6 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 
 	// ensure sandbox terminating
 	if !box.DeletionTimestamp.IsZero() {
-		// Always create Reconcile span so child spans (EnsureSandboxTerminated,
-		// DeletePod) have a valid parent. The span is dropped by
-		// FilteringSpanProcessor when no write operation occurred.
-		ctx, reconcileSpan := tracing.StartReconcileSpan(ctx, box)
-		reconcileSpan.SetAttributes(attribute.String(tracing.AttrSandboxPhase, string(box.Status.Phase)))
-		if traceID := tracing.TraceIDFromContext(ctx); traceID != "" {
-			ctx = klog.NewContext(ctx, klog.FromContext(ctx).WithValues("traceID", traceID))
-		}
-		// End the Reconcile span via defer so it covers the whole iteration. Its
-		// status stays Ok; per-operation outcomes are recorded on child spans.
-		defer tracing.EndSpan(ctx, reconcileSpan, nil)
 		if box.Status.Phase != agentsv1alpha1.SandboxFailed && box.Status.Phase != agentsv1alpha1.SandboxSucceeded {
 			klog.FromContext(ctx).Info("Sandbox Delete started", "sandbox", klog.KObj(box), "previousPhase", string(box.Status.Phase))
 		}
@@ -314,16 +318,9 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 		klog.FromContext(ctx).Info("Sandbox phase started", "sandbox", klog.KObj(box), "phase", string(newStatus.Phase), "previousPhase", string(box.Status.Phase))
 	}
 
-	// Create Reconcile span for non-terminating, non-completed reconciles.
-	// Tracing must start here to avoid creating noise spans for no-op iterations.
-	ctx, reconcileSpan := tracing.StartReconcileSpan(ctx, box)
+	// Refresh the phase attribute now that calculateStatus determined the
+	// phase this iteration actually handles.
 	reconcileSpan.SetAttributes(attribute.String(tracing.AttrSandboxPhase, string(newStatus.Phase)))
-	if traceID := tracing.TraceIDFromContext(ctx); traceID != "" {
-		ctx = klog.NewContext(ctx, klog.FromContext(ctx).WithValues("traceID", traceID))
-	}
-	// End the Reconcile span via defer so it covers the whole iteration. Its
-	// status stays Ok; per-operation outcomes are recorded on child spans.
-	defer tracing.EndSpan(ctx, reconcileSpan, nil)
 
 	phaseBefore := newStatus.Phase
 
@@ -349,7 +346,9 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 		err = r.getControl(args.Pod).EnsureSandboxUpgraded(ctx, args)
 		tracing.EndSpan(ctx, span, err)
 	case agentsv1alpha1.SandboxRecycling:
+		ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerEnsureSandboxRecycled)
 		requeueAfter, err = r.getControl(args.Pod).EnsureSandboxRecycled(ctx, args)
+		tracing.EndSpan(ctx, span, err)
 	default:
 		klog.FromContext(ctx).Info("sandbox status phase is invalid", "sandbox", klog.KObj(box), "phase", box.Status.Phase)
 		return ctrl.Result{RequeueAfter: requeueAfter}, nil
@@ -402,7 +401,10 @@ func (r *SandboxReconciler) addSandboxHashAnnotation(ctx context.Context, box *a
 	}
 	_, hashImmutablePart := core.HashSandbox(box)
 	originObj.Annotations[agentsv1alpha1.SandboxHashImmutablePart] = hashImmutablePart
-	if err := client.IgnoreNotFound(r.Patch(ctx, originObj, patch)); err != nil {
+	patchCtx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerPatchSandbox)
+	err := client.IgnoreNotFound(r.Patch(patchCtx, originObj, patch))
+	tracing.EndSpan(patchCtx, span, err)
+	if err != nil {
 		klog.FromContext(ctx).Error(err, "failed to patch sandbox hash annotation", "sandbox", klog.KObj(box))
 		return nil, fmt.Errorf("failed to patch hash annotation: %w", err)
 	}
@@ -738,7 +740,10 @@ func (r *SandboxReconciler) ensureVolumeClaimTemplates(ctx context.Context, box 
 			return err
 		}
 
-		if err = r.Create(ctx, pvc); err == nil {
+		pvcCtx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerCreatePVC)
+		err = r.Create(pvcCtx, pvc)
+		tracing.EndSpan(pvcCtx, span, client.IgnoreAlreadyExists(err))
+		if err == nil {
 			klog.FromContext(ctx).Info("created PVC for persistent data recovery", "sandbox", klog.KObj(box), "pvc", pvcName)
 			continue
 		}
@@ -805,7 +810,10 @@ func (r *SandboxReconciler) handlePauseTimeout(ctx context.Context, box *agentsv
 		}
 	}
 
-	if err := r.Patch(ctx, modified, patch); err != nil {
+	patchCtx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerPatchSandbox)
+	err := r.Patch(patchCtx, modified, patch)
+	tracing.EndSpan(patchCtx, span, err)
+	if err != nil {
 		if errors.IsConflict(err) {
 			return ctrl.Result{Requeue: true}, true, nil
 		}
@@ -839,7 +847,10 @@ func (r *SandboxReconciler) handleShutdownTimeout(ctx context.Context, box *agen
 	}
 
 	klog.FromContext(ctx).Info("sandbox shutdown time reached, deleting", "sandbox", klog.KObj(box), "shutdownTime", box.Spec.ShutdownTime)
-	return true, r.Delete(ctx, box)
+	delCtx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerDeleteSandbox)
+	err := r.Delete(delCtx, box)
+	tracing.EndSpan(delCtx, span, err)
+	return true, err
 }
 
 // calcTimeoutRequeue returns the nearest requeue duration based on pending

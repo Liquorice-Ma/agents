@@ -214,6 +214,73 @@ func TestEndSpan_Error_RetainsWholeReconcileTrace(t *testing.T) {
 	}
 }
 
+// TestEndSpan_ReconcileOwnError_RetainsIteration covers failures that are not
+// wrapped in any child span (e.g. a transient API error in the Recycling path
+// with no status change): the Reconcile span ends with the final Reconcile
+// error, so the iteration is marked failed and retained instead of being
+// dropped as no-op.
+func TestEndSpan_ReconcileOwnError_RetainsIteration(t *testing.T) {
+	rec, cleanup := setupTracerWithFilter(t)
+	defer cleanup()
+
+	box := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "recycle-fail", Namespace: "default", UID: "recycle-uid",
+		},
+	}
+	ctx, reconcileSpan := StartReconcileSpan(context.Background(), box)
+	// No child span and no write happened; the failure surfaces only through
+	// the final Reconcile return value passed to EndSpan.
+	EndSpan(ctx, reconcileSpan, errors.New("transient get error"))
+
+	require.Equal(t, 1, rec.len(), "iteration failing without a child span must still be exported")
+	assert.Equal(t, codes.Error, rec.getSpans()[0].Status().Code)
+}
+
+// TestSiblingSpans_ReadThenWrite_NoMissingParent verifies the sibling pattern
+// used by call sites: a read-mostly span is started and ended on a LOCAL
+// context, and the subsequent write span starts from the Reconcile context.
+// The read span (ended before any write, hence dropped as no-op) must not be
+// the parent of the retained write span, so the exported trace never
+// references a dropped parent.
+func TestSiblingSpans_ReadThenWrite_NoMissingParent(t *testing.T) {
+	rec, cleanup := setupTracerWithFilter(t)
+	defer cleanup()
+
+	box := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "sibling-test", Namespace: "default", UID: "sibling-uid",
+		},
+	}
+	ctx, reconcileSpan := StartReconcileSpan(context.Background(), box)
+
+	// Read-mostly span on a local context; it ends before any write occurred
+	// in this iteration and is therefore dropped as no-op.
+	readCtx, readSpan := StartControllerSpan(ctx, SpanControllerAssumePodCheckpointed)
+	EndSpan(readCtx, readSpan, nil)
+
+	// The subsequent write span starts from the Reconcile context, staying a
+	// sibling of the dropped read span instead of its child.
+	writeCtx, writeSpan := StartControllerSpan(ctx, SpanControllerDeletePod)
+	EndSpan(writeCtx, writeSpan, nil)
+	EndSpan(ctx, reconcileSpan, nil)
+
+	require.Equal(t, 2, rec.len(), "Reconcile and DeletePod should be exported, the read span dropped")
+	var deletePod, reconcile sdktrace.ReadOnlySpan
+	for _, s := range rec.getSpans() {
+		switch s.Name() {
+		case SpanControllerDeletePod:
+			deletePod = s
+		case SpanControllerReconcile:
+			reconcile = s
+		}
+	}
+	require.NotNil(t, deletePod, "DeletePod span should be exported")
+	require.NotNil(t, reconcile, "Reconcile span should be exported")
+	assert.Equal(t, reconcile.SpanContext().SpanID(), deletePod.Parent().SpanID(),
+		"the write span must parent under the retained Reconcile span, not the dropped read span")
+}
+
 func TestEndSpan_WithoutWriteFlag_AlwaysExports(t *testing.T) {
 	rec, cleanup := setupTracerWithFilter(t)
 	defer cleanup()
