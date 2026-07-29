@@ -80,16 +80,27 @@ jobs:
       - name: Port-forward sandbox-manager
         run: |
           # Expose the manager E2B API to the runner for the Tracing Full
-          # Chain suite. Redirect output so the step does not hang waiting
-          # for the background process; it keeps running across steps.
-          nohup kubectl -n sandbox-system port-forward svc/sandbox-manager 7788:7788 >/tmp/port-forward.log 2>&1 &
+          # Chain suite. The Service port 7788 fronts the envoy sidecar
+          # (sandbox traffic proxy), NOT the manager API, so forward to the
+          # manager container port 8080 (http-manager) directly. Redirect
+          # output so the step does not hang waiting for the background
+          # process; it keeps running across steps.
+          nohup kubectl -n sandbox-system port-forward deployment/sandbox-manager 7788:8080 >/tmp/port-forward.log 2>&1 &
           for i in $(seq 1 30); do
             if curl -sf http://localhost:7788/health >/dev/null; then
               echo "sandbox-manager is reachable"; break
             fi
             sleep 2
           done
-          curl -sf http://localhost:7788/health >/dev/null || { cat /tmp/port-forward.log; echo >&2 "sandbox-manager not reachable via port-forward"; exit 1; }
+          curl -sf http://localhost:7788/health >/dev/null || {
+            cat /tmp/port-forward.log
+            echo "===== sandbox-manager pods ====="
+            kubectl -n sandbox-system get pods -o wide
+            kubectl -n sandbox-system describe deployment sandbox-manager | tail -20
+            kubectl -n sandbox-system logs deployment/sandbox-manager -c controller --tail=50 || true
+            echo >&2 "sandbox-manager not reachable via port-forward"
+            exit 1
+          }
       - name: Run Tracing E2E Tests
         run: |
           export KUBECONFIG=/home/runner/.kube/config
