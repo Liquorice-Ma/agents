@@ -418,8 +418,11 @@ func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus a
 	}
 	oldPhase := box.Status.Phase
 
+	// phase.after records the phase this status patch writes. It has
+	// independent value on the shouldRequeue early-return path, where the
+	// Reconcile span's phase attribute has not been refreshed; the full
+	// before->after transition is recorded in logs and K8s Events.
 	ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerUpdateStatus,
-		attribute.String(tracing.AttrPhaseBefore, string(box.Status.Phase)),
 		attribute.String(tracing.AttrPhaseAfter, string(newStatus.Phase)),
 	)
 

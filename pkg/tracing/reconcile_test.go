@@ -177,8 +177,8 @@ func TestStartControllerSpan_WithinReconcile(t *testing.T) {
 	defer reconcileSpan.End()
 
 	// Start a child span within the Reconcile context.
-	_, childSpan := StartControllerSpan(reconcileCtx, SpanControllerCreatePod,
-		attribute.String(AttrPodName, "test-pod"),
+	_, childSpan := StartControllerSpan(reconcileCtx, SpanControllerCheckpoint,
+		attribute.String(AttrCheckpointName, "test-cp"),
 	)
 	defer childSpan.End()
 

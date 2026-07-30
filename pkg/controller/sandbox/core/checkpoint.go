@@ -218,10 +218,10 @@ func (c *CheckpointControl) createCheckpoint(ctx context.Context, box *agentsv1a
 		},
 	}
 	ScaleExpectation.ExpectScale(GetControllerKey(box), expectations.Create, cpName)
+	// The enclosing Reconcile span already carries the sandbox identity
+	// attributes; only the checkpoint name is specific to this span.
 	ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerCheckpoint,
 		attribute.String(tracing.AttrCheckpointName, cpName),
-		attribute.String(tracing.AttrSandboxName, box.Name),
-		attribute.String(tracing.AttrSandboxNamespace, box.Namespace),
 	)
 	err := c.Create(ctx, cp)
 	tracing.EndSpan(ctx, span, err)

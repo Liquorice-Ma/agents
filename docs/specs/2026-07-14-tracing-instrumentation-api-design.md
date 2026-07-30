@@ -122,9 +122,7 @@ defer func() { tracing.EndSpan(ctx, span, err) }()
 ### 4.2 Controller operation inside a Reconcile
 
 ```go
-ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerCreatePod,
-    attribute.String(tracing.AttrPodName, pod.Name),
-)
+ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerCreatePod)
 err := c.Create(ctx, pod)
 tracing.EndSpan(ctx, span, err)
 ```

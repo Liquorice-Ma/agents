@@ -54,7 +54,6 @@ const (
 	SpanControllerDeleteSandbox         = "controller.DeleteSandbox"
 	SpanControllerRemoveFinalizer       = "controller.RemoveFinalizer"
 	SpanControllerCheckpoint            = "controller.Checkpoint"
-	SpanControllerProcessCSIMounts      = "controller.ProcessCSIMounts"
 	SpanControllerAgentRuntimeInit      = "controller.AgentRuntimeInit"
 	SpanControllerUpdateStatus          = "controller.updateSandboxStatus"
 
@@ -79,12 +78,10 @@ const (
 	AttrSandboxName      = "sandbox.name"
 	AttrSandboxNamespace = "sandbox.namespace"
 	AttrSandboxPhase     = "sandbox.phase"
-	AttrPodName          = "pod.name"
 	AttrCheckpointName   = "checkpoint.name"
 	// AttrCheckpointRejected records whether AssumePodCheckpointed rejected the
 	// pause (validation failed or checkpoint not yet complete).
 	AttrCheckpointRejected  = "checkpoint.rejected"
-	AttrPhaseBefore         = "phase.before"
 	AttrPhaseAfter          = "phase.after"
 	AttrClaimLockType       = "claim.lock_type"
 	AttrClaimRetries        = "claim.retries"
@@ -118,7 +115,6 @@ var writeSpanNames = map[string]bool{
 	SpanControllerDeleteSandbox:    true,
 	SpanControllerRemoveFinalizer:  true,
 	SpanControllerCheckpoint:       true,
-	SpanControllerProcessCSIMounts: true,
 	SpanControllerAgentRuntimeInit: true,
 	SpanControllerUpdateStatus:     true,
 }

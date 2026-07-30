@@ -303,7 +303,6 @@ func (r *commonControl) createPod(ctx context.Context, box *agentsv1alpha1.Sandb
 
     ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerCreatePod)
     err = r.Create(ctx, pod)
-    span.SetAttributes(attribute.String(tracing.AttrPodName, pod.Name))
     tracing.EndSpan(ctx, span, err)
     // ...
 }
@@ -314,8 +313,7 @@ func (r *commonControl) createPod(ctx context.Context, box *agentsv1alpha1.Sandb
 In `EnsureSandboxPaused` and `EnsureSandboxTerminated`:
 
 ```go
-ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerDeletePod,
-    attribute.String(tracing.AttrPodName, pod.Name))
+ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerDeletePod)
 err = r.Delete(ctx, pod, &client.DeleteOptions{...})
 tracing.EndSpan(ctx, span, err)
 ```
@@ -329,7 +327,6 @@ func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, ...) error 
     if reflect.DeepEqual(box.Status, newStatus) { return nil }
 
     ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerUpdateStatus,
-        attribute.String(tracing.AttrPhaseBefore, string(box.Status.Phase)),
         attribute.String(tracing.AttrPhaseAfter, string(newStatus.Phase)),
     )
     err := r.Status().Patch(...)

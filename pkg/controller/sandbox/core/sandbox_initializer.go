@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 
-	"go.opentelemetry.io/otel/attribute"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
@@ -31,7 +30,6 @@ import (
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
-	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils"
 	csimountutils "github.com/openkruise/agents/pkg/utils/csiutils"
 	utilruntime "github.com/openkruise/agents/pkg/utils/runtime"
@@ -129,23 +127,12 @@ func Initialize(ctx context.Context, box *agentsv1alpha1.Sandbox, newStatus *age
 			})
 		}
 
-		// Cleanup ProcessCSIMounts for concurrent mount execution
-		// Trace the CSI remount as a child span, recording the volume count
-		// and driver list as attributes for troubleshooting slow mounts.
-		drivers := make([]string, len(mountOptionList))
-		for i, m := range mountOptionList {
-			drivers[i] = m.Driver
-		}
-		csiCtx, csiSpan := tracing.StartControllerSpan(ctx, tracing.SpanControllerProcessCSIMounts,
-			attribute.Int(tracing.AttrCSIVolumeCount, len(mountOptionList)),
-			attribute.StringSlice(tracing.AttrCSIDrivers, drivers),
-		)
-		duration, mountErr := utilruntime.ProcessCSIMounts(csiCtx, sbxForInit, config.CSIMountOptions{
+		// Cleanup ProcessCSIMounts for concurrent mount execution. No dedicated
+		// span here: the whole Initialize call is already traced (and error-
+		// recorded) by the outer AgentRuntimeInit span on the resume path.
+		duration, mountErr := utilruntime.ProcessCSIMounts(ctx, sbxForInit, config.CSIMountOptions{
 			MountOptionList: mountOptionList,
 		})
-		// End the span explicitly so it only covers the mount duration,
-		// not the rest of this function.
-		tracing.EndSpan(csiCtx, csiSpan, mountErr)
 		if mountErr != nil {
 			return fmt.Errorf("failed to perform ReCSIMount after resume: %w", mountErr)
 		}

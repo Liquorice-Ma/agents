@@ -37,8 +37,6 @@ import (
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	"github.com/openkruise/agents/pkg/utils/sidecarutils"
-
-	"go.opentelemetry.io/otel/attribute"
 )
 
 // PodGenerateArgs holds the arguments for PodGenerateFunc.
@@ -128,13 +126,10 @@ func (c *PodControl) CreatePod(ctx context.Context, args CreatePodArgs) (*corev1
 	}
 
 	ScaleExpectation.ExpectScale(GetControllerKey(box), expectations.Create, box.Name)
-	// Trace the pod creation as a child span; the pod name attribute is set
-	// after Create since generateName is only resolved by the API server.
+	// Trace the pod creation as a child span. No pod name attribute: the pod
+	// name always equals the sandbox name, which the Reconcile span carries.
 	ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerCreatePod)
 	err = c.Create(ctx, pod)
-	if pod.Name != "" {
-		span.SetAttributes(attribute.String(tracing.AttrPodName, pod.Name))
-	}
 	// AlreadyExists is an idempotent success here (the pod is already in the
 	// desired state), so normalize it at this call site; EndSpan itself is
 	// policy-neutral because AlreadyExists is a genuine failure elsewhere.

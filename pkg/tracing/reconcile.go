@@ -99,8 +99,7 @@ func StartReconcileSpan(ctx context.Context, obj client.Object) (context.Context
 // Together with EndSpan it is the only pair of functions needed to instrument
 // a piece of controller code:
 //
-//	ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerCreatePod,
-//	    attribute.String(tracing.AttrPodName, pod.Name))
+//	ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerCreatePod)
 //	err := c.Create(ctx, pod)
 //	tracing.EndSpan(ctx, span, err)
 //
