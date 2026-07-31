@@ -126,6 +126,8 @@ func preserveTypedError(err error, contextMsg string) error {
 //   - sandboxClaimTotal: claim-operation counter broken down by lock_type.
 func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts ClaimSandboxOptions) (sandbox infra.Sandbox, err error) {
 	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanManagerClaimSandbox)
+	// Keep the closure: a direct defer tracing.EndSpan(ctx, span, err) would
+	// evaluate err while still nil and record every failure as success.
 	defer func() { tracing.EndSpan(ctx, span, err) }()
 	log := klog.FromContext(ctx)
 	infraOpts := opts.Infra
@@ -176,6 +178,8 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts ClaimSandboxOpti
 
 func (m *SandboxManager) CloneSandbox(ctx context.Context, opts CloneSandboxOptions) (sandbox infra.Sandbox, err error) {
 	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanManagerCloneSandbox)
+	// Keep the closure: a direct defer tracing.EndSpan(ctx, span, err) would
+	// evaluate err while still nil and record every failure as success.
 	defer func() { tracing.EndSpan(ctx, span, err) }()
 	log := klog.FromContext(ctx)
 	infraOpts := opts.Infra
@@ -304,6 +308,8 @@ func (m *SandboxManager) syncRoute(ctx context.Context, sbx infra.Sandbox, refre
 	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanProxySyncRoute,
 		attribute.String(tracing.AttrRouteID, sbx.GetRoute().ID),
 	)
+	// Keep the closure: a direct defer tracing.EndSpan(ctx, span, err) would
+	// evaluate err while still nil and record every failure as success.
 	defer func() { tracing.EndSpan(ctx, span, err) }()
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
 	// Refresh sandbox to get the latest state if needed
@@ -346,6 +352,8 @@ type pauseResumeConfig struct {
 // Operation-specific behavior is provided via pauseResumeConfig.
 func (m *SandboxManager) runPauseResume(ctx context.Context, sbx infra.Sandbox, cfg pauseResumeConfig) (err error) {
 	ctx, span := tracing.StartManagerSpan(ctx, cfg.spanName)
+	// Keep the closure: a direct defer tracing.EndSpan(ctx, span, err) would
+	// evaluate err while still nil and record every failure as success.
 	defer func() { tracing.EndSpan(ctx, span, err) }()
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
 	start := time.Now()
@@ -400,6 +408,8 @@ func (m *SandboxManager) deleteRouteAndSync(ctx context.Context, sbx infra.Sandb
 // On both accepted-delete return paths (reuse trigger success and Kill success), quota is released.
 func (m *SandboxManager) DeleteSandbox(ctx context.Context, opts DeleteSandboxOptions) (err error) {
 	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanManagerDeleteSandbox)
+	// Keep the closure: a direct defer tracing.EndSpan(ctx, span, err) would
+	// evaluate err while still nil and record every failure as success.
 	defer func() { tracing.EndSpan(ctx, span, err) }()
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(opts.Sandbox))
 	sbx := opts.Sandbox

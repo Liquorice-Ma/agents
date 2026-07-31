@@ -83,6 +83,8 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanInfraCloneSandbox,
 		attribute.String(tracing.AttrCloneCheckpointID, opts.CheckPointID),
 	)
+	// Keep the closure: a direct defer tracing.EndSpan(ctx, span, err) would
+	// evaluate err while still nil and record every failure as success.
 	defer func() { tracing.EndSpan(ctx, span, err) }()
 	log := klog.FromContext(ctx).WithValues("checkpointID", opts.CheckPointID)
 	opts.LockString = chooseLockString(opts.Admission, opts.LockString)
@@ -517,18 +519,17 @@ func CreateCheckpoint(ctx context.Context, sbx *v1alpha1.Sandbox, cache infracac
 
 	// Step 3: Wait for the Checkpoint to reach Succeeded.
 	// In the future, we can delete the failed Checkpoint and retry like ClaimSandbox
-	// Trace the wait phase as a dedicated span with explicit EndSpan so it
-	// only covers the time spent waiting for the Checkpoint to succeed and
-	// records whether the wait failed.
+	// Trace the wait phase as a dedicated span so it only covers the time spent
+	// waiting for the Checkpoint to succeed and records whether the wait failed.
 	waitCtx, waitSpan := tracing.StartManagerSpan(ctx, tracing.SpanManagerWaitForCheckpoint,
 		attribute.String(tracing.AttrCheckpointName, cp.Name),
 	)
-	if err = cache.NewCheckpointTask(waitCtx, cp).Wait(opts.WaitSuccessTimeout); err != nil {
-		tracing.EndSpan(waitCtx, waitSpan, err)
+	err = cache.NewCheckpointTask(waitCtx, cp).Wait(opts.WaitSuccessTimeout)
+	tracing.EndSpan(waitCtx, waitSpan, err)
+	if err != nil {
 		log.Error(err, "failed to wait checkpoint ready")
 		return "", fmt.Errorf("failed to wait checkpoint ready: %w", err)
 	}
-	tracing.EndSpan(waitCtx, waitSpan, nil)
 	fresh := &v1alpha1.Checkpoint{}
 	if err = cache.GetClient().Get(ctx, client.ObjectKeyFromObject(cp), fresh); err != nil {
 		log.Error(err, "failed to refresh checkpoint after wait")

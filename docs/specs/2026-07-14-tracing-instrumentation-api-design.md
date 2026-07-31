@@ -170,6 +170,37 @@ Adding a new instrumented operation:
    marks the iteration on every Kubernetes write — there is no registry to
    update and no marking API to call.
 
+### Why `EndSpan` is deferred inside a closure
+
+Operations spanning a whole function (the Reconcile root Span, the manager
+HTTP root Span and the manager-side operation Spans) close their Span with a
+deferred **closure** over a named error result:
+
+```go
+func (m *SandboxManager) ClaimSandbox(ctx context.Context, ...) (sandbox infra.Sandbox, err error) {
+    ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanManagerClaimSandbox)
+    defer func() { tracing.EndSpan(ctx, span, err) }()
+```
+
+This keeps the contract at one `Start` plus one `End` per Span no matter how
+many exit points the function has, and it must not be "simplified" to
+`defer tracing.EndSpan(ctx, span, err)`. Arguments of a deferred call are
+evaluated when the `defer` statement executes, not when the deferred call runs
+([Go spec](https://go.dev/ref/spec#Defer_statements),
+[Effective Go](https://go.dev/doc/effective_go#defer)), so `err` would be
+captured while still `nil` and every failure would be recorded as `codes.Ok`.
+A function literal, by contrast, may read the named result after the `return`
+statement has set it, which is why the closure form is correct.
+
+The failure mode is silent: Spans still close, traces are still exported and
+tests still pass — the only symptom is that failed operations look successful
+in Jaeger. Every such call site therefore carries a short comment warning
+against removing the closure, and `EndSpan`'s godoc documents the rule.
+
+Single-operation child Spans do not need this: the error is available on the
+spot, so they use the plain three-line form from Section 4
+(`Start` → operation → `EndSpan`).
+
 ---
 
 ## 6. Behavior Guarantees (No Functional Change)

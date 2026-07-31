@@ -56,7 +56,9 @@ func (sc *Controller) CreateSnapshot(r *http.Request) (web.ApiResponse[*models.S
 	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanManagerCreateSnapshot)
 	// Register EndSpan via defer with a stable operation-error variable so the
 	// span is structurally guaranteed to close on every return path, keeping
-	// this call site consistent with the other manager operations.
+	// this call site consistent with the other manager operations. Keep the
+	// closure: a direct defer tracing.EndSpan(ctx, span, err) would evaluate
+	// err while still nil and record every failure as success.
 	var err error
 	defer func() { tracing.EndSpan(ctx, span, err) }()
 	// Record optional request extensions as span attributes when present.

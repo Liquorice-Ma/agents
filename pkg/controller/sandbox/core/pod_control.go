@@ -133,11 +133,11 @@ func (c *PodControl) CreatePod(ctx context.Context, args CreatePodArgs) (*corev1
 	// AlreadyExists is an idempotent success here (the pod is already in the
 	// desired state), so normalize it at this call site; EndSpan itself is
 	// policy-neutral because AlreadyExists is a genuine failure elsewhere.
-	if errors.IsAlreadyExists(err) {
-		tracing.EndSpan(ctx, span, nil)
-	} else {
-		tracing.EndSpan(ctx, span, err)
+	spanErr := err
+	if errors.IsAlreadyExists(spanErr) {
+		spanErr = nil
 	}
+	tracing.EndSpan(ctx, span, spanErr)
 	if err != nil {
 		ScaleExpectation.ObserveScale(GetControllerKey(box), expectations.Create, box.Name)
 		if !errors.IsAlreadyExists(err) {

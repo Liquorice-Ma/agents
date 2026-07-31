@@ -231,6 +231,8 @@ func StartControllerSpan(ctx context.Context, name string, attrs ...attribute.Ke
 //	ctx, rootSpan := tracing.StartManagerRootSpan(ctx, "POST /sandboxes", requestID)
 //	defer func() { tracing.EndSpan(ctx, rootSpan, err) }()
 //
+// The closure around EndSpan is required, not stylistic; see EndSpan.
+//
 // Parameters:
 //   - ctx: the incoming request context. It must NOT already carry a Span:
 //     the manager originates traces, so this call always creates a root.
@@ -260,6 +262,8 @@ func StartManagerRootSpan(ctx context.Context, name, requestID string) (context.
 //	    ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanManagerClaimSandbox)
 //	    defer func() { tracing.EndSpan(ctx, span, err) }()
 //	    ...
+//
+// The closure around EndSpan is required, not stylistic; see EndSpan.
 //
 // Unlike StartControllerSpan it has no no-op guard: the manager originates
 // traces, so a call without a parent Span (e.g. a background task) simply
@@ -291,6 +295,23 @@ func StartManagerSpan(ctx context.Context, name string, attrs ...attribute.KeyVa
 // StartManagerRootSpan, StartManagerSpan):
 //
 //	tracing.EndSpan(ctx, span, err)
+//
+// When the instrumented operation has more than one exit point, register the
+// call with a deferred closure over a named error result:
+//
+//	func doSomething(ctx context.Context) (err error) {
+//	    ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanManagerDoSomething)
+//	    defer func() { tracing.EndSpan(ctx, span, err) }()
+//
+// The closure is mandatory: it must never be "simplified" to
+// defer tracing.EndSpan(ctx, span, err). Arguments of a deferred call are
+// evaluated when the defer statement executes, not when the deferred call
+// runs (https://go.dev/ref/spec#Defer_statements), so err would be captured
+// while still nil and every failure would be recorded as codes.Ok. Nothing
+// fails loudly when that happens - the Span still closes, traces are still
+// exported and tests still pass; the only symptom is that failed operations
+// look successful in trace UIs, which is exactly the kind of bug tracing is
+// supposed to surface.
 //
 // Parameters:
 //   - ctx: the context returned by the Start call that created the Span.

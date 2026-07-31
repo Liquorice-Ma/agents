@@ -111,15 +111,18 @@ func RegisterRoute[T any](mux *http.ServeMux, method, path string, handler Handl
 		// enabling unified trace-log correlation.
 		ctx, rootSpan := tracing.StartManagerRootSpan(ctx, fmt.Sprintf("%s %s", method, path), requestID)
 		// err carries the final middleware/handler error so the deferred
-		// EndSpan can record the request outcome on the root span. The explicit
-		// nil check avoids the typed-nil *ApiError turning into a non-nil error.
+		// EndSpan can record the request outcome on the root span. Keep the
+		// closure: a direct defer tracing.EndSpan(ctx, rootSpan, err) would
+		// evaluate err while still nil and record every failure as success.
 		var err *ApiError
 		defer func() {
+			// Convert through a plain error so a typed-nil *ApiError does not
+			// turn into a non-nil error interface.
+			var spanErr error
 			if err != nil {
-				tracing.EndSpan(ctx, rootSpan, err)
-			} else {
-				tracing.EndSpan(ctx, rootSpan, nil)
+				spanErr = err
 			}
+			tracing.EndSpan(ctx, rootSpan, spanErr)
 		}()
 
 		// Store root span context so that InjectTraceContext uses the root span's SpanID

@@ -272,7 +272,9 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 	}
 	// End the Reconcile span with the final Reconcile error via defer: a
 	// failing iteration is marked failed and always retained even when the
-	// error path is not wrapped in its own child span.
+	// error path is not wrapped in its own child span. Keep the closure: a
+	// direct defer tracing.EndSpan(ctx, reconcileSpan, err) would evaluate err
+	// while still nil and record every failed Reconcile as successful.
 	defer func() { tracing.EndSpan(ctx, reconcileSpan, err) }()
 
 	// Process VolumeClaimTemplates for persistent data recovery during sleep/wake operations

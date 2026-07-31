@@ -187,6 +187,8 @@ func (s *Sandbox) Kill(ctx context.Context) (err error) {
 	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanInfraKill,
 		attribute.String(tracing.AttrSandboxName, s.Name),
 	)
+	// Keep the closure: a direct defer tracing.EndSpan(ctx, span, err) would
+	// evaluate err while still nil and record every failure as success.
 	defer func() { tracing.EndSpan(ctx, span, err) }()
 
 	// Inject trace context before deletion so the controller's terminating
@@ -379,6 +381,8 @@ func (s *Sandbox) Request(ctx context.Context, method, path string, port int, bo
 
 func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) (err error) {
 	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanInfraPause)
+	// Keep the closure: a direct defer tracing.EndSpan(ctx, span, err) would
+	// evaluate err while still nil and record every failure as success.
 	defer func() { tracing.EndSpan(ctx, span, err) }()
 	log := klog.FromContext(ctx)
 	if err := s.refreshFromAPIReader(ctx); err != nil {
@@ -443,6 +447,8 @@ const resumeWaitMaxTimeout = 10 * time.Minute
 
 func (s *Sandbox) Resume(ctx context.Context, opts infra.ResumeOptions) (err error) {
 	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanInfraResume)
+	// Keep the closure: a direct defer tracing.EndSpan(ctx, span, err) would
+	// evaluate err while still nil and record every failure as success.
 	defer func() { tracing.EndSpan(ctx, span, err) }()
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox))
 
@@ -555,6 +561,8 @@ func (s *Sandbox) CreateCheckpoint(ctx context.Context, opts infra.CreateCheckpo
 	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanInfraCreateCheckpoint,
 		attribute.Float64(tracing.AttrCheckpointDuration, opts.WaitSuccessTimeout.Seconds()),
 	)
+	// Keep the closure: a direct defer tracing.EndSpan(ctx, span, err) would
+	// evaluate err while still nil and record every failure as success.
 	defer func() { tracing.EndSpan(ctx, span, err) }()
 	log := klog.FromContext(ctx)
 	log.Info("create checkpoint options", "options", opts)
