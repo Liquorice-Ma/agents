@@ -138,9 +138,8 @@ func (r *commonControl) EnsureSandboxUpdated(ctx context.Context, args EnsureFun
 			klog.FromContext(ctx).Info("Waiting for pod ready before initialization", "sandbox", klog.KObj(box))
 			return nil
 		}
-		// Trace the initialization so its latency is observable in Jaeger. The
-		// span name is registered in writeSpanNames, so StartControllerSpan
-		// marks the enclosing Reconcile as having written.
+		// Trace the initialization so its latency is observable in Jaeger;
+		// the writes it performs are tracked by the write-tracking client.
 		ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerAgentRuntimeInit)
 		err := r.initializer.Initialize(ctx, box, newStatus)
 		tracing.EndSpan(ctx, span, err)
@@ -155,15 +154,9 @@ func (r *commonControl) EnsureSandboxUpdated(ctx context.Context, args EnsureFun
 	// (PreUpgrade -> UpgradePod -> PostUpgrade). Recreate and CheckpointRestore
 	// are excluded here because they require the full lifecycle.
 	if !RequiresPodReplacementUpgrade(box) {
-		done, wrote, err := r.handleInplaceUpdateSandbox(ctx, args)
+		done, err := r.handleInplaceUpdateSandbox(ctx, args)
 		if err != nil {
 			return err
-		}
-		if wrote {
-			// handleInplaceUpdateSandbox performed an actual write (e.g. patched
-			// the Pod or set an InplaceUpdate condition). Mark the Reconcile write
-			// flag so the enclosing Reconcile span is retained.
-			tracing.MarkWrite(ctx)
 		}
 		if !done {
 			// In-place update still in progress: early-return so that
@@ -447,7 +440,7 @@ func (r *commonControl) EnsureSandboxTerminated(ctx context.Context, args Ensure
 	return nil
 }
 
-func (r *commonControl) handleInplaceUpdateSandbox(ctx context.Context, args EnsureFuncArgs) (done bool, wrote bool, err error) {
+func (r *commonControl) handleInplaceUpdateSandbox(ctx context.Context, args EnsureFuncArgs) (done bool, err error) {
 	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
 	handler := &CommonInPlaceUpdateHandler{
 		control:  r.inplaceUpdateControl,

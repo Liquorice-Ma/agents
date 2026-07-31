@@ -21,6 +21,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -29,6 +30,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/tracing"
@@ -122,6 +124,7 @@ var _ = Describe("Tracing Stdout", func() {
 		// delay), so poll the logs instead of reading them once. The stdout
 		// exporter pretty-prints spans as JSON, hence the `"Name": "..."`
 		// assertions below cannot collide with regular klog output.
+		traceMarker := `"TraceID": "` + traceID + `"`
 		Eventually(func(g Gomega) {
 			logs := podLogs(ctx, controllerNamespace, controllerPodSelector, controllerContainerName)
 			g.Expect(logs).To(ContainSubstring(`"Name": "` + tracing.SpanControllerReconcile + `"`))
@@ -130,8 +133,39 @@ var _ = Describe("Tracing Stdout", func() {
 			// Spans triggered by this sandbox must carry the trace ID extracted
 			// from the annotation, proving controller-side trace-context
 			// extraction works.
-			g.Expect(logs).To(ContainSubstring(`"TraceID": "` + traceID + `"`))
+			g.Expect(logs).To(ContainSubstring(traceMarker))
 		}, time.Minute*2, time.Second*5).Should(Succeed())
+
+		By("Waiting for span exports of this trace to settle")
+		// The create flow may still be flushing through the BatchSpanProcessor;
+		// wait until two consecutive polls observe the same span count for this
+		// trace before asserting nothing new joins it.
+		prev := -1
+		Eventually(func() bool {
+			n := strings.Count(podLogs(ctx, controllerNamespace, controllerPodSelector, controllerContainerName), traceMarker)
+			settled := n == prev
+			prev = n
+			return settled
+		}, time.Minute*2, time.Second*5).Should(BeTrue(), "span exports for the trace did not settle")
+
+		By("Poking the Sandbox with an innocuous annotation to force a read-only Reconcile")
+		// Regression guard for the no-op filter: the annotation change triggers
+		// a Reconcile that performs no Kubernetes write (spec, status and pod
+		// are untouched), so the write-tracking client never marks the
+		// iteration and its spans must be dropped — the trace stays at the
+		// settled span count. The traceparent annotation is still on the CR, so
+		// a wrongly retained iteration would join this very trace and fail the
+		// count assertion below.
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, sandbox)).To(Succeed())
+		orig := sandbox.DeepCopy()
+		sandbox.Annotations["e2e.agents.openkruise.io/noop-poke"] = fmt.Sprintf("%d", time.Now().UnixNano())
+		Expect(k8sClient.Patch(ctx, sandbox, client.MergeFrom(orig))).To(Succeed())
+
+		By("Verifying the read-only Reconcile exports no new spans for this trace")
+		Consistently(func() int {
+			return strings.Count(podLogs(ctx, controllerNamespace, controllerPodSelector, controllerContainerName), traceMarker)
+		}, time.Second*30, time.Second*5).Should(Equal(prev),
+			"read-only Reconcile iterations must be filtered out and never export spans")
 	})
 })
 

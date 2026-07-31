@@ -29,7 +29,9 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
@@ -64,8 +66,9 @@ func (p *recordingSpanProcessor) getSpans() []sdktrace.ReadOnlySpan {
 }
 
 // setupTracerWithFilter creates a TracerProvider whose spans pass through a
-// FilteringSpanProcessor wrapping a recordingSpanProcessor. Returns the recording
-// processor and a cleanup function.
+// FilteringSpanProcessor wrapping a recordingSpanProcessor. It also flips the
+// enabled flag on, since StartReconcileSpan only installs the write flag when
+// tracing is enabled. Returns the recording processor and a cleanup function.
 func setupTracerWithFilter(t *testing.T) (*recordingSpanProcessor, func()) {
 	t.Helper()
 	rec := &recordingSpanProcessor{}
@@ -75,16 +78,41 @@ func setupTracerWithFilter(t *testing.T) (*recordingSpanProcessor, func()) {
 	)
 	prevTP := otel.GetTracerProvider()
 	prevProp := otel.GetTextMapPropagator()
+	prevEnabled := enabledFlag.Load()
 	otel.SetTracerProvider(tp)
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
 		propagation.TraceContext{},
 		propagation.Baggage{},
 	))
+	enabledFlag.Store(true)
 	return rec, func() {
 		_ = tp.Shutdown(context.Background())
 		otel.SetTracerProvider(prevTP)
 		otel.SetTextMapPropagator(prevProp)
+		enabledFlag.Store(prevEnabled)
 	}
+}
+
+// TestStartReconcileSpan_DisabledSkipsWriteFlag verifies that with tracing
+// disabled StartReconcileSpan does not install the write flag, so mode "none"
+// pays not even the context allocation.
+func TestStartReconcileSpan_DisabledSkipsWriteFlag(t *testing.T) {
+	prevEnabled := enabledFlag.Load()
+	enabledFlag.Store(false)
+	t.Cleanup(func() { enabledFlag.Store(prevEnabled) })
+
+	box := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "disabled-test", Namespace: "default", UID: "disabled-uid",
+		},
+	}
+	ctx, _ := StartReconcileSpan(context.Background(), box)
+	assert.Nil(t, ctx.Value(writeFlagKey{}),
+		"write flag must not be installed when tracing is disabled")
+
+	// markWrite on such a context must be a safe no-op.
+	markWrite(ctx)
+	assert.False(t, hasWrite(ctx))
 }
 
 func TestEndSpan_NoWrite_MarksNoop(t *testing.T) {
@@ -97,7 +125,7 @@ func TestEndSpan_NoWrite_MarksNoop(t *testing.T) {
 		},
 	}
 	ctx, span := StartReconcileSpan(context.Background(), box)
-	// No MarkWrite call — this Reconcile did no write operation.
+	// No markWrite call — this Reconcile did no write operation.
 	EndSpan(ctx, span, nil)
 
 	// The span should have AttrReconcileNoop=true and be dropped by the filter.
@@ -115,7 +143,7 @@ func TestEndSpan_WithWrite_RetainsSpan(t *testing.T) {
 	}
 	ctx, span := StartReconcileSpan(context.Background(), box)
 	// Simulate a write operation (e.g., CreatePod was called).
-	MarkWrite(ctx)
+	markWrite(ctx)
 	EndSpan(ctx, span, nil)
 
 	// The span should NOT have AttrReconcileNoop and should be forwarded.
@@ -130,7 +158,10 @@ func TestEndSpan_WithWrite_RetainsSpan(t *testing.T) {
 	assert.False(t, hasNoop, "span with write should not have noop attribute")
 }
 
-func TestStartControllerSpan_WriteOperation_MarksWriteFlag(t *testing.T) {
+// TestStartControllerSpan_DoesNotMarkWrite verifies Span names are purely
+// observational: even a span named CreatePod does not mark the write flag —
+// retention is decided solely by the write-tracking client and failures.
+func TestStartControllerSpan_DoesNotMarkWrite(t *testing.T) {
 	rec, cleanup := setupTracerWithFilter(t)
 	defer cleanup()
 
@@ -141,37 +172,39 @@ func TestStartControllerSpan_WriteOperation_MarksWriteFlag(t *testing.T) {
 	}
 	ctx, reconcileSpan := StartReconcileSpan(context.Background(), box)
 
-	// StartControllerSpan for a write-operation name should auto-mark the write flag.
+	// A CreatePod-named span alone must not mark the write flag.
 	ctx, childSpan := StartControllerSpan(ctx, SpanControllerCreatePod)
 	EndSpan(ctx, childSpan, nil)
 
-	// Now end the reconcile span — it should be retained because CreatePod marked write.
+	// The reconcile span ends without any client write: dropped as no-op.
 	EndSpan(ctx, reconcileSpan, nil)
 
-	// Both spans should be forwarded (Reconcile + CreatePod).
-	assert.Equal(t, 2, rec.len(), "both Reconcile and CreatePod spans should be forwarded")
+	assert.Equal(t, 0, rec.len(), "spans should be dropped when no client write occurred")
 }
 
-func TestStartControllerSpan_NonWriteOperation_DoesNotMarkWriteFlag(t *testing.T) {
+// TestWriteThroughClient_RetainsIteration is the bare-write regression: a
+// Reconcile that performs a Kubernetes write directly through the
+// write-tracking client — without wrapping it in any child span — must be
+// retained instead of being dropped as no-op.
+func TestWriteThroughClient_RetainsIteration(t *testing.T) {
 	rec, cleanup := setupTracerWithFilter(t)
 	defer cleanup()
 
 	box := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "child-nowrite-test", Namespace: "default", UID: "child-nowrite-uid",
+			Name: "bare-write-test", Namespace: "default", UID: "bare-write-uid",
 		},
 	}
 	ctx, reconcileSpan := StartReconcileSpan(context.Background(), box)
 
-	// StartControllerSpan for a non-write-operation name should NOT mark the write flag.
-	ctx, childSpan := StartControllerSpan(ctx, SpanControllerEnsureSandboxUpdated)
-	EndSpan(ctx, childSpan, nil)
+	// Bare write: no child span at all, just a client call.
+	cli := NewWriteTrackingClient(clientfake.NewClientBuilder().Build())
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default"}}
+	require.NoError(t, cli.Create(ctx, pod))
 
-	// Now end the reconcile span — it should be dropped because no write occurred.
 	EndSpan(ctx, reconcileSpan, nil)
 
-	// Both spans should be dropped (Reconcile + EnsureSandboxUpdated).
-	assert.Equal(t, 0, rec.len(), "both spans should be dropped when no write occurred")
+	assert.Equal(t, 1, rec.len(), "iteration with a bare client write must be retained")
 }
 
 func TestEndSpan_Error_RetainsWholeReconcileTrace(t *testing.T) {
@@ -260,8 +293,11 @@ func TestSiblingSpans_ReadThenWrite_NoMissingParent(t *testing.T) {
 	EndSpan(readCtx, readSpan, nil)
 
 	// The subsequent write span starts from the Reconcile context, staying a
-	// sibling of the dropped read span instead of its child.
+	// sibling of the dropped read span instead of its child. The write itself
+	// goes through the write-tracking client, which marks the iteration.
 	writeCtx, writeSpan := StartControllerSpan(ctx, SpanControllerDeletePod)
+	cli := NewWriteTrackingClient(clientfake.NewClientBuilder().Build())
+	_ = cli.Delete(writeCtx, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default"}})
 	EndSpan(writeCtx, writeSpan, nil)
 	EndSpan(ctx, reconcileSpan, nil)
 
@@ -398,7 +434,7 @@ func TestWriteFlag(t *testing.T) {
 			wantWrite: true,
 		},
 		{
-			name:      "MarkWrite without write flag is a no-op",
+			name:      "markWrite without write flag is a no-op",
 			setup:     func(ctx context.Context) context.Context { return ctx },
 			markWrite: true,
 			wantWrite: false,
@@ -409,7 +445,7 @@ func TestWriteFlag(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := tt.setup(context.Background())
 			if tt.markWrite {
-				MarkWrite(ctx)
+				markWrite(ctx)
 			}
 			assert.Equal(t, tt.wantWrite, hasWrite(ctx))
 		})
@@ -462,20 +498,20 @@ func TestFailedFlag(t *testing.T) {
 
 func TestMarkWrite_Idempotent(t *testing.T) {
 	ctx := withWriteFlag(context.Background())
-	assert.False(t, hasWrite(ctx), "should be false before MarkWrite")
+	assert.False(t, hasWrite(ctx), "should be false before markWrite")
 
-	MarkWrite(ctx)
-	assert.True(t, hasWrite(ctx), "should be true after first MarkWrite")
+	markWrite(ctx)
+	assert.True(t, hasWrite(ctx), "should be true after first markWrite")
 
-	MarkWrite(ctx)
-	assert.True(t, hasWrite(ctx), "should remain true after second MarkWrite")
+	markWrite(ctx)
+	assert.True(t, hasWrite(ctx), "should remain true after second markWrite")
 }
 
 func TestWriteFlag_IndependentFlags(t *testing.T) {
 	ctx1 := withWriteFlag(context.Background())
 	ctx2 := withWriteFlag(context.Background())
 
-	MarkWrite(ctx1)
+	markWrite(ctx1)
 	assert.True(t, hasWrite(ctx1), "ctx1 should be marked")
 	assert.False(t, hasWrite(ctx2), "ctx2 should not be affected by marking ctx1")
 }

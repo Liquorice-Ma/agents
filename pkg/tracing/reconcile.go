@@ -70,11 +70,15 @@ func StartReconcileSpan(ctx context.Context, obj client.Object) (context.Context
 	annotations := obj.GetAnnotations()
 	ctx = ExtractTraceContext(ctx, annotations)
 
-	// Attach a fresh write flag so downstream operations can mark this
-	// Reconcile as having performed real work or having failed. Reconcile and
-	// EnsureSandbox* Spans with neither a write nor a failure are dropped by
-	// FilteringSpanProcessor (see EndSpan).
-	ctx = withWriteFlag(ctx)
+	// Attach a fresh write flag so downstream writes issued through the
+	// write-tracking client can mark this Reconcile as having performed real
+	// work. Reconcile and EnsureSandbox* Spans with neither a write nor a
+	// failure are dropped by FilteringSpanProcessor (see EndSpan). Skipped
+	// entirely when tracing is disabled so mode "none" pays not even the
+	// context allocation.
+	if Enabled() {
+		ctx = withWriteFlag(ctx)
+	}
 
 	tracer := Tracer(controllerTracerName)
 	attrs := []attribute.KeyValue{
@@ -110,9 +114,9 @@ func StartReconcileSpan(ctx context.Context, obj client.Object) (context.Context
 //     point), a no-op Span is returned so instrumentation stays zero-cost and
 //     never creates orphan root Spans.
 //   - name: Span name; use one of the SpanController* constants from spans.go.
-//     Names registered in writeSpanNames additionally mark the enclosing
-//     Reconcile as a write operation, so its Spans are retained instead of
-//     being dropped as no-op.
+//     Span names are purely observational: whether the enclosing Reconcile is
+//     retained is decided by the write-tracking client (any Kubernetes write)
+//     and by failures, never by which Spans were created.
 //   - attrs: optional attributes built with attribute.String/Int/... and the
 //     Attr* keys from spans.go.
 //
@@ -122,13 +126,6 @@ func StartControllerSpan(ctx context.Context, name string, attrs ...attribute.Ke
 	// If no valid parent span exists in ctx, return noop to avoid orphan spans.
 	if !trace.SpanFromContext(ctx).SpanContext().IsValid() {
 		return ctx, trace.SpanFromContext(context.Background())
-	}
-
-	// A write-operation Span (e.g. CreatePod, DeletePod, updateSandboxStatus)
-	// means this Reconcile did real work; mark it so the enclosing Reconcile and
-	// EnsureSandbox* Spans are retained rather than filtered as no-op.
-	if writeSpanNames[name] {
-		MarkWrite(ctx)
 	}
 
 	tracer := Tracer(controllerTracerName)

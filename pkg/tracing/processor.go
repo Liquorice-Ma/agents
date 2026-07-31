@@ -25,7 +25,7 @@ import (
 
 // filteringSpanProcessor wraps another SpanProcessor and drops Spans that were
 // marked as no-op via the AttrReconcileNoop attribute. It lets the controller
-// always create a Reconcile Span (so child write-operation Spans have a valid
+// always create a Reconcile Span (so child operation Spans have a valid
 // parent) while still keeping empty, write-free Reconcile iterations out of the
 // exported trace data. All non-marked Spans are forwarded to the wrapped
 // processor unchanged.
@@ -82,25 +82,25 @@ type writeFlag struct {
 
 // withWriteFlag returns a context carrying a fresh write flag. It must be called
 // once at the start of each Reconcile iteration (in StartReconcileSpan) so that
-// downstream write operations can mark it via MarkWrite.
+// downstream write operations can mark it via markWrite.
 func withWriteFlag(ctx context.Context) context.Context {
 	return context.WithValue(ctx, writeFlagKey{}, &writeFlag{})
 }
 
-// MarkWrite records that a real write operation happened in the current Reconcile.
-// Write-operation Spans created via StartControllerSpan (see writeSpanNames) call it
-// automatically; call it directly only when a write happens inside a helper whose
-// individual operations are not wrapped in their own Spans (e.g. a deep function
-// reporting success via a done bool). It is a no-op if the context carries no
-// write flag (e.g. tracing disabled or called outside a Reconcile).
-// Safe for concurrent use.
-func MarkWrite(ctx context.Context) {
+// markWrite records that a real write operation happened in the current Reconcile.
+// It is deliberately unexported: the only marking path is the write-tracking
+// client (see client.go) intercepting Kubernetes write calls, so instrumentation
+// authors never have to know about the flag — any write issued through the
+// client is tracked automatically.
+// It is a no-op if the context carries no write flag (e.g. tracing disabled or
+// called outside a Reconcile). Safe for concurrent use.
+func markWrite(ctx context.Context) {
 	if f, ok := ctx.Value(writeFlagKey{}).(*writeFlag); ok {
 		f.written.Store(true)
 	}
 }
 
-// hasWrite reports whether MarkWrite was called for the current Reconcile.
+// hasWrite reports whether markWrite was called for the current Reconcile.
 // Returns false if the context carries no write flag.
 func hasWrite(ctx context.Context) bool {
 	if f, ok := ctx.Value(writeFlagKey{}).(*writeFlag); ok {

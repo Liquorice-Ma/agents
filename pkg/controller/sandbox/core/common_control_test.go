@@ -1755,7 +1755,7 @@ func TestCommonControl_handleInplaceUpdateSandbox(t *testing.T) {
 		NewStatus: &agentsv1alpha1.SandboxStatus{},
 	}
 
-	done, _, err := control.handleInplaceUpdateSandbox(context.TODO(), args1)
+	done, err := control.handleInplaceUpdateSandbox(context.TODO(), args1)
 	if err != nil {
 		t.Fatalf("handleInplaceUpdateSandbox() error = %v", err)
 	}
@@ -1802,7 +1802,7 @@ func TestCommonControl_handleInplaceUpdateSandbox(t *testing.T) {
 		NewStatus: &agentsv1alpha1.SandboxStatus{UpdateRevision: "new-revision"},
 	}
 
-	done, _, err = control.handleInplaceUpdateSandbox(context.TODO(), args2)
+	done, err = control.handleInplaceUpdateSandbox(context.TODO(), args2)
 	if err != nil {
 		t.Fatalf("handleInplaceUpdateSandbox() error = %v", err)
 	}
@@ -1849,7 +1849,7 @@ func TestCommonControl_handleInplaceUpdateSandbox(t *testing.T) {
 		NewStatus: &agentsv1alpha1.SandboxStatus{UpdateRevision: "same-revision"},
 	}
 
-	done, _, err = control.handleInplaceUpdateSandbox(context.TODO(), args3)
+	done, err = control.handleInplaceUpdateSandbox(context.TODO(), args3)
 	if err != nil {
 		t.Fatalf("handleInplaceUpdateSandbox() error = %v", err)
 	}
@@ -2298,7 +2298,7 @@ func TestCommonControl_EnsureSandboxUpdated_InplaceNotDone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureSandboxUpdated() unexpected error: %v", err)
 	}
-	// handleInplaceUpdateSandbox with hash mismatch returns (done=true, wrote=false, nil), so status gets synced
+	// handleInplaceUpdateSandbox with hash mismatch returns (done=true, nil), so status gets synced
 	if newStatus.SandboxIp != "10.0.0.2" {
 		t.Errorf("Expected SandboxIp '10.0.0.2', got %s", newStatus.SandboxIp)
 	}

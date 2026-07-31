@@ -36,7 +36,9 @@ import (
 )
 
 // setupBenchTracer creates a TracerProvider with FilteringSpanProcessor for
-// benchmarking, matching the production configuration.
+// benchmarking, matching the production configuration. It also flips the
+// enabled flag on, since StartReconcileSpan only installs the write flag when
+// tracing is enabled.
 func setupBenchTracer(b *testing.B) func() {
 	b.Helper()
 	rec := &recordingSpanProcessor{}
@@ -46,15 +48,18 @@ func setupBenchTracer(b *testing.B) func() {
 	)
 	prevTP := otel.GetTracerProvider()
 	prevProp := otel.GetTextMapPropagator()
+	prevEnabled := enabledFlag.Load()
 	otel.SetTracerProvider(tp)
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
 		propagation.TraceContext{},
 		propagation.Baggage{},
 	))
+	enabledFlag.Store(true)
 	return func() {
 		_ = tp.Shutdown(context.Background())
 		otel.SetTracerProvider(prevTP)
 		otel.SetTextMapPropagator(prevProp)
+		enabledFlag.Store(prevEnabled)
 	}
 }
 
@@ -74,13 +79,15 @@ func BenchmarkReconcileSpan_NoWrite(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		ctx, span := StartReconcileSpan(context.Background(), box)
-		// No MarkWrite — simulates an empty Reconcile with no write operations.
+		// No markWrite — simulates an empty Reconcile with no write operations.
 		EndSpan(ctx, span, nil)
 	}
 }
 
 // BenchmarkReconcileSpan_WithWrite measures the overhead when a write operation
-// occurred (span is retained and forwarded to the batch processor).
+// occurred (span is retained and forwarded to the batch processor). markWrite
+// is called directly, simulating what the write-tracking client does on a
+// Kubernetes write, without adding fake-client overhead to the measurement.
 func BenchmarkReconcileSpan_WithWrite(b *testing.B) {
 	cleanup := setupBenchTracer(b)
 	defer cleanup()
@@ -95,13 +102,14 @@ func BenchmarkReconcileSpan_WithWrite(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		ctx, span := StartReconcileSpan(context.Background(), box)
-		MarkWrite(ctx)
+		markWrite(ctx)
 		EndSpan(ctx, span, nil)
 	}
 }
 
-// BenchmarkReconcileSpan_WithChildWrite measures the full path: Reconcile span
-// + a write-operation child span (e.g. CreatePod) + EndSpan.
+// BenchmarkReconcileSpan_WithChildWrite measures the full retained path:
+// Reconcile span + a child operation span (e.g. CreatePod) + the write mark
+// the write-tracking client would set for the Kubernetes write inside.
 func BenchmarkReconcileSpan_WithChildWrite(b *testing.B) {
 	cleanup := setupBenchTracer(b)
 	defer cleanup()
@@ -117,12 +125,13 @@ func BenchmarkReconcileSpan_WithChildWrite(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		ctx, reconcileSpan := StartReconcileSpan(context.Background(), box)
 		ctx, childSpan := StartControllerSpan(ctx, SpanControllerCreatePod)
+		markWrite(ctx)
 		EndSpan(ctx, childSpan, nil)
 		EndSpan(ctx, reconcileSpan, nil)
 	}
 }
 
-// BenchmarkWriteFlag measures the raw write-flag operations (MarkWrite + hasWrite)
+// BenchmarkWriteFlag measures the raw write-flag operations (markWrite + hasWrite)
 // without any span overhead, to isolate the atomic operation cost.
 func BenchmarkWriteFlag(b *testing.B) {
 	ctx := withWriteFlag(context.Background())
@@ -130,7 +139,7 @@ func BenchmarkWriteFlag(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		MarkWrite(ctx)
+		markWrite(ctx)
 		_ = hasWrite(ctx)
 	}
 }

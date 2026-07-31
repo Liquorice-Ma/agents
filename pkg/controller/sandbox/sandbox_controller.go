@@ -121,15 +121,20 @@ func Add(mgr manager.Manager, metricsCleanup Enqueuer) error {
 
 	rateLimiter := core.NewRateLimiter()
 	recorder := mgr.GetEventRecorderFor("sandbox")
-	checkpointControl := core.NewCheckpointControl(mgr.GetClient(), recorder)
-	podControl := core.NewPodControl(mgr.GetClient(), recorder, core.GeneratePodFromSandbox)
+	// Wrap the client so any Kubernetes write performed anywhere in this
+	// controller's call tree marks the Reconcile iteration as real work,
+	// keeping it from being dropped as no-op by the FilteringSpanProcessor.
+	// With tracing disabled this returns the manager's client unwrapped.
+	cli := tracing.NewWriteTrackingClient(mgr.GetClient())
+	checkpointControl := core.NewCheckpointControl(cli, recorder)
+	podControl := core.NewPodControl(cli, recorder, core.GeneratePodFromSandbox)
 	podControl.SetCheckpointIDAnnotationKey(checkpointIDAnnotationKey)
 	err := (&SandboxReconciler{
-		Client:            mgr.GetClient(),
+		Client:            cli,
 		Scheme:            mgr.GetScheme(),
 		checkpointControl: checkpointControl,
 		controls: core.NewSandboxControl(core.SandboxControlArgs{
-			Client:            mgr.GetClient(),
+			Client:            cli,
 			APIReader:         mgr.GetAPIReader(),
 			Recorder:          recorder,
 			RateLimiter:       rateLimiter,

@@ -37,7 +37,10 @@ const (
 	SpanProxySyncRoute = "proxy.syncRoute"
 )
 
-// Span name constants for sandbox-controller.
+// Span name constants for sandbox-controller. All controller Span names are
+// purely observational: they decide what shows up as a named segment in trace
+// UIs, never whether the Reconcile iteration is retained. Retention is decided
+// by the write-tracking client (see client.go) and by failures alone.
 const (
 	SpanControllerReconcile             = "controller.Reconcile"
 	SpanControllerEnsureSandboxRunning  = "controller.EnsureSandboxRunning"
@@ -58,16 +61,12 @@ const (
 	SpanControllerUpdateStatus          = "controller.updateSandboxStatus"
 
 	// SpanControllerAssumePodCheckpointed covers the checkpoint validation flow
-	// before pod deletion on pause (image validation + checkpoint polling). It
-	// is read-mostly, so it is intentionally NOT in writeSpanNames: the actual
-	// checkpoint creation inside is traced by SpanControllerCheckpoint, which
-	// marks the write.
+	// before pod deletion on pause (image validation + checkpoint polling).
 	SpanControllerAssumePodCheckpointed = "controller.AssumePodCheckpointed"
-	// SpanControllerCheckpointCleanup covers pod-info checkpoint cleanup. It is
-	// intentionally NOT in writeSpanNames: the cleanup marks the write
-	// explicitly only when a checkpoint is actually deleted, so empty cleanups
-	// don't retain no-op iterations.
+	// SpanControllerCheckpointCleanup covers pod-info checkpoint cleanup; each
+	// actual deletion inside is traced by SpanControllerDeleteCheckpoint.
 	SpanControllerCheckpointCleanup = "controller.CheckpointCleanup"
+	SpanControllerDeleteCheckpoint  = "controller.DeleteCheckpoint"
 )
 
 // Attribute key constants for Spans.
@@ -101,20 +100,3 @@ const (
 	// by FilteringSpanProcessor to keep empty Reconcile iterations out of traces.
 	AttrReconcileNoop = "reconcile.noop"
 )
-
-// writeSpanNames is the set of child Span names that represent a real write
-// operation. When StartControllerSpan creates any of these, it marks the current
-// Reconcile as having written (see MarkWrite), so the enclosing Reconcile and
-// EnsureSandbox* Spans are retained instead of being filtered as no-op.
-var writeSpanNames = map[string]bool{
-	SpanControllerCreatePod:        true,
-	SpanControllerDeletePod:        true,
-	SpanControllerPatchPod:         true,
-	SpanControllerCreatePVC:        true,
-	SpanControllerPatchSandbox:     true,
-	SpanControllerDeleteSandbox:    true,
-	SpanControllerRemoveFinalizer:  true,
-	SpanControllerCheckpoint:       true,
-	SpanControllerAgentRuntimeInit: true,
-	SpanControllerUpdateStatus:     true,
-}
