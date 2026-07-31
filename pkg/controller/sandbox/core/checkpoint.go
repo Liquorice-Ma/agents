@@ -162,20 +162,18 @@ func (c *CheckpointControl) Cleanup(ctx context.Context, box *agentsv1alpha1.San
 	if !utilfeature.DefaultFeatureGate.Enabled(features.SandboxPauseCheckpointGate) {
 		return
 	}
-	// Trace the cleanup so its latency is observable in Jaeger. Spans are
-	// purely observational: whether the iteration is retained is decided by
-	// the write-tracking client (the Delete calls below) and by failures.
-	// Cleanup stays best-effort; errors are only recorded on the span so
-	// failures are visible in traces.
+	// Trace the cleanup so its latency is observable in Jaeger. The span is
+	// ended explicitly at both exits (a deferred direct call would capture a
+	// nil error); the deletion failures below are best-effort and only
+	// recorded on the span so they stay visible in traces.
 	ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerCheckpointCleanup)
-	var err error
-	defer func() { tracing.EndSpan(ctx, span, err) }()
 	cpList, cpErr := listCheckpointsForSandbox(ctx, c.Client, box, agentsv1alpha1.CheckpointTypePodInfo)
 	if cpErr != nil {
-		err = cpErr
 		klog.FromContext(ctx).Error(cpErr, "Failed to list checkpoints for cleanup", "sandbox", klog.KObj(box))
+		tracing.EndSpan(ctx, span, cpErr)
 		return
 	}
+	var lastErr error
 	for i := range cpList {
 		ScaleExpectation.ExpectScale(GetControllerKey(box), expectations.Delete, cpList[i].Name)
 		delCtx, delSpan := tracing.StartControllerSpan(ctx, tracing.SpanControllerDeleteCheckpoint)
@@ -184,11 +182,12 @@ func (c *CheckpointControl) Cleanup(ctx context.Context, box *agentsv1alpha1.San
 		if delErr != nil && !errors.IsNotFound(delErr) {
 			ScaleExpectation.ObserveScale(GetControllerKey(box), expectations.Delete, cpList[i].Name)
 			klog.FromContext(ctx).Error(delErr, "Failed to delete checkpoint after resume", "sandbox", klog.KObj(box), "checkpoint", cpList[i].Name)
-			err = delErr
+			lastErr = delErr
 		} else {
 			klog.FromContext(ctx).Info("Deleted checkpoint after successful resume", "sandbox", klog.KObj(box), "checkpoint", cpList[i].Name)
 		}
 	}
+	tracing.EndSpan(ctx, span, lastErr)
 }
 
 // createCheckpoint creates a Checkpoint CR. The checkpoint controller is
