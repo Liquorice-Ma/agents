@@ -317,8 +317,11 @@ func NewRequestID() string {
 // IsValidRequestID reports whether id can serve as an OTel TraceID:
 // exactly 32 hex characters and not all-zero (an all-zero trace ID is
 // invalid per the W3C Trace Context and OTel specifications). Both cases
-// of hex digits are accepted; the API layer lowercases accepted IDs to the
-// canonical TraceID string form before use.
+// of hex digits are accepted, and an accepted ID is used verbatim: the API
+// layer never rewrites a caller-provided request ID, because callers grep
+// logs for the exact value they sent. Uppercase hex decodes to the same
+// TraceID bytes; only the canonical string form in trace backends is
+// lowercase.
 func IsValidRequestID(id string) bool {
 	if len(id) != 32 {
 		return false

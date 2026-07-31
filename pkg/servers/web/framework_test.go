@@ -238,10 +238,11 @@ func TestRegisterRoute(t *testing.T) {
 var requestIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
 // TestRequestIDHandling verifies the X-Request-ID contract of RegisterRoute:
-// caller-provided IDs are never replaced (only lowercased to the canonical
-// TraceID form when tracing is enabled); absent IDs are generated directly
-// in the tracing representation; when tracing is enabled, IDs unusable as an
-// OTel TraceID are rejected with 400 instead of being silently replaced.
+// caller-provided IDs are never rewritten (not even case-normalized, so a
+// caller can always grep logs for the exact value it sent); absent IDs are
+// generated directly in the tracing representation; when tracing is enabled,
+// IDs unusable as an OTel TraceID are rejected with 400 instead of being
+// silently replaced.
 func TestRequestIDHandling(t *testing.T) {
 	okHandler := func(r *http.Request) (ApiResponse[string], *ApiError) {
 		return ApiResponse[string]{Code: http.StatusOK, Body: "ok"}, nil
@@ -299,11 +300,11 @@ func TestRequestIDHandling(t *testing.T) {
 			expectedHeaderID: validID,
 		},
 		{
-			name:             "uppercase hex ID is lowercased to canonical TraceID form when tracing enabled",
+			name:             "uppercase hex ID passes through untouched when tracing enabled",
 			tracingEnabled:   true,
 			requestID:        strings.ToUpper(validID),
 			expectedStatus:   http.StatusOK,
-			expectedHeaderID: validID,
+			expectedHeaderID: strings.ToUpper(validID),
 		},
 		{
 			name:           "invalid ID rejected with 400 when tracing enabled",
@@ -358,7 +359,7 @@ func TestRequestIDHandling(t *testing.T) {
 			switch {
 			case tt.expectedStatus == http.StatusOK && tt.expectedHeaderID != "":
 				assert.Equal(t, tt.expectedHeaderID, w.Header().Get("X-Request-ID"),
-					"caller-provided X-Request-ID must only be case-normalized, never replaced")
+					"caller-provided X-Request-ID must never be rewritten")
 			case tt.expectedStatus == http.StatusOK:
 				assert.Regexp(t, requestIDPattern, w.Header().Get("X-Request-ID"),
 					"server-generated X-Request-ID must be 32 lowercase hex chars")

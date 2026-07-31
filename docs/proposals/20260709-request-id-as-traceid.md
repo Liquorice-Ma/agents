@@ -42,9 +42,9 @@ This proposal modifies four aspects of the trace context generation design from
 2. **Request ID as TraceID**: Use the HTTP request ID directly as the OTel TraceID,
    enabling unified trace-log correlation. Server-generated request IDs are emitted
    directly in the required representation (32 lowercase hex characters);
-   caller-provided IDs are validated and never replaced (only case-normalized to
-   the canonical TraceID form when tracing is enabled). Implemented via a custom
-   `IDGenerator` without manual span context construction.
+   caller-provided IDs are validated and **never rewritten** — not even
+   case-normalized, so a caller can always grep logs for the exact value it sent.
+   Implemented via a custom `IDGenerator` without manual span context construction.
 3. **OTel non-blocking async export**: Confirmed `BatchSpanProcessor` async batch
    export mechanism — enabling tracing does not impact business performance.
 4. **Controller span noise reduction**: Move `StartReconcileSpan` after `shouldRequeue`
@@ -112,19 +112,20 @@ The request ID uses this representation directly.
 - **Absent `X-Request-ID`**: the server generates the ID directly in the required
   representation — 32 lowercase hex characters from 16 random bytes
   (`tracing.NewRequestID`). No conversion or rewriting is ever needed afterwards.
-- **Caller-provided `X-Request-ID`**: the value is **never replaced** — the
-  API-visible value (response header, error body, logs) is the caller's own ID,
-  at most case-normalized.
+- **Caller-provided `X-Request-ID`**: the value is **never rewritten** — not even
+  case-normalized. The API-visible value (response header, error body, logs) is
+  byte-for-byte the caller's own ID. This is deliberate: callers set this header
+  precisely so they can grep our logs for the exact value they hold, and
+  rewriting it would break that lookup and cut the cross-system call chain.
   - Tracing disabled: any non-empty value is accepted verbatim (used only for log
     correlation).
   - Tracing enabled: the ID doubles as the OTel TraceID, so it must be 32 hex
     characters and not all-zero (`tracing.IsValidRequestID`). An invalid ID is
     rejected with **400 Bad Request** instead of being silently replaced; note
     this also rejects standard hyphenated UUIDs (36 characters) — clients must
-    send the 32-hex form when tracing is on. Accepted IDs are lowercased to the
-    canonical TraceID string form (the ID bytes are unchanged) so the request ID
-    string in logs and headers compares equal to the TraceID string shown by
-    trace backends.
+    send the 32-hex form when tracing is on. Uppercase hex is accepted and used
+    verbatim: it decodes to the same TraceID bytes, so the trace is unaffected;
+    only the canonical string form rendered by trace backends is lowercase.
 
 **Sampling**: because the TraceID equals the caller-supplied request ID, the
 decision must not be derived from the TraceID — otherwise a caller could pick
