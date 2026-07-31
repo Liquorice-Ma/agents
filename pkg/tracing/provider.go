@@ -19,10 +19,12 @@ package tracing
 import (
 	"context"
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/hex"
 	"flag"
 	"fmt"
 	"os"
+	"sync/atomic"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
@@ -202,7 +204,7 @@ func InitTracerProvider(ctx context.Context, cfg Config) (func(context.Context) 
 	// enabling unified trace-log correlation. Sampling uses randomRatioSampler
 	// rather than TraceIDRatioBased: since the TraceID is the caller-supplied
 	// request ID, a TraceID-derived decision would let callers pick IDs that
-	// are always sampled (see sampler.go).
+	// are always sampled (see randomRatioSampler below).
 	batcher := sdktrace.NewBatchSpanProcessor(exporter)
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithSpanProcessor(NewFilteringSpanProcessor(batcher)),
@@ -285,4 +287,95 @@ func (g *RequestIDGenerator) NewSpanID(_ context.Context, _ trace.TraceID) trace
 	var spanID trace.SpanID
 	_, _ = rand.Read(spanID[:])
 	return spanID
+}
+
+// enabledFlag records whether a real (non-noop) TracerProvider was installed
+// by InitTracerProvider. It gates request-ID validation at the web framework
+// boundary: only when tracing is on must a caller-provided request ID be
+// usable as an OTel TraceID.
+var enabledFlag atomic.Bool
+
+// Enabled returns true when tracing was initialized with a real exporter
+// (mode "otel", "std" or "file"), and false for mode "none", before
+// InitTracerProvider is called, or after shutdown.
+func Enabled() bool {
+	return enabledFlag.Load()
+}
+
+// NewRequestID returns a server-generated request ID directly in the
+// representation required by the tracing scheme: 32 lowercase hex characters
+// (16 random bytes), usable as an OTel TraceID as-is. Generating the required
+// form up front means caller-visible request IDs never need rewriting.
+func NewRequestID() string {
+	b := make([]byte, 16)
+	// crypto/rand.Read does not fail on supported platforms; the OTel SDK
+	// relies on the same source for its random IDs.
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+// IsValidRequestID reports whether id can serve as an OTel TraceID:
+// exactly 32 hex characters and not all-zero (an all-zero trace ID is
+// invalid per the W3C Trace Context and OTel specifications). Both cases
+// of hex digits are accepted; the API layer lowercases accepted IDs to the
+// canonical TraceID string form before use.
+func IsValidRequestID(id string) bool {
+	if len(id) != 32 {
+		return false
+	}
+	b, err := hex.DecodeString(id)
+	if err != nil {
+		return false
+	}
+	for _, x := range b {
+		if x != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// randomRatioSampler samples root spans with the configured probability using
+// a server-controlled random draw instead of the TraceID.
+//
+// With the custom RequestIDGenerator, the TraceID equals the caller-provided
+// request ID. The standard TraceIDRatioBased sampler derives its decision
+// deterministically from the TraceID, so a caller could choose request IDs
+// that always (or never) fall inside the sampled range, defeating the
+// configured rate as a capacity/cost limit and making sampling
+// caller-controllable. Drawing from crypto/rand keeps the decision
+// unpredictable to callers; the cost of one 8-byte read per root span is
+// negligible next to span creation itself.
+//
+// ratio semantics: >= 1 always samples, 0 never samples (values outside
+// [0, 1] are rejected by InitTracerProvider before this sampler is built).
+type randomRatioSampler struct {
+	ratio float64
+}
+
+// ShouldSample implements sdktrace.Sampler.
+func (s randomRatioSampler) ShouldSample(p sdktrace.SamplingParameters) sdktrace.SamplingResult {
+	psc := trace.SpanContextFromContext(p.ParentContext)
+	decision := sdktrace.Drop
+	if s.ratio >= 1 || randomFloat64() < s.ratio {
+		decision = sdktrace.RecordAndSample
+	}
+	return sdktrace.SamplingResult{
+		Decision:   decision,
+		Tracestate: psc.TraceState(),
+	}
+}
+
+// randomFloat64 returns a uniform float64 in [0, 1) drawn from crypto/rand,
+// using the top 53 bits for full mantissa precision.
+func randomFloat64() float64 {
+	var b [8]byte
+	// crypto/rand.Read does not fail on supported platforms.
+	_, _ = rand.Read(b[:])
+	return float64(binary.BigEndian.Uint64(b[:])>>11) / (1 << 53)
+}
+
+// Description implements sdktrace.Sampler.
+func (s randomRatioSampler) Description() string {
+	return fmt.Sprintf("RandomRatioBased{%g}", s.ratio)
 }

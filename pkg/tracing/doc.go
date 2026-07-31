@@ -18,10 +18,12 @@ limitations under the License.
 // sandbox lifecycle management across sandbox-manager and sandbox-controller.
 //
 // The package contains:
-//   - provider.go: TracerProvider initialization and OTLP gRPC exporter setup
+//   - provider.go: TracerProvider initialization, exporters, sampling, and
+//     request-ID helpers (TraceID == request ID)
 //   - propagator.go: W3C Trace Context injection/extraction via CRD annotations
-//   - processor.go: FilteringSpanProcessor dropping no-op Reconcile Spans
-//   - reconcile.go: instrumentation API (StartReconcileSpan, StartControllerSpan,
-//     StartManagerRootSpan, StartManagerSpan, EndSpan)
-//   - spans.go: Span name and attribute key constants
+//   - processor.go: no-op Reconcile filtering (FilteringSpanProcessor, the
+//     per-Reconcile write flag, and the write-tracking client)
+//   - span.go: instrumentation API (StartReconcileSpan, StartControllerSpan,
+//     StartManagerRootSpan, StartManagerSpan, EndSpan) plus Span name and
+//     attribute key constants
 package tracing

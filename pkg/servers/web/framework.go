@@ -96,7 +96,7 @@ func RegisterRoute[T any](mux *http.ServeMux, method, path string, handler Handl
 		// limitation: a caller reusing the same X-Request-ID across
 		// independent requests makes them share one TraceID; the configured
 		// sampling rate is unaffected because the sampling decision uses a
-		// server-side random draw (see pkg/tracing/sampler.go).
+		// server-side random draw (see randomRatioSampler in pkg/tracing).
 		if tracing.Enabled() && !tracing.IsValidRequestID(requestID) {
 			safeWriteJson(ctx, w, http.StatusBadRequest, http.StatusBadRequest, &ApiError{
 				Code:    http.StatusBadRequest,

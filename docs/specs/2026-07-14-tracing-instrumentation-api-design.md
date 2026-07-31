@@ -73,7 +73,7 @@ tracer API anymore.
 
 ## 3. API at a Glance
 
-All functions live in `pkg/tracing/reconcile.go`.
+All functions live in `pkg/tracing/span.go`.
 
 | Function | Use it in | Parent-missing behavior | SpanKind | Extras |
 |---|---|---|---|---|
@@ -147,7 +147,7 @@ defer func() { tracing.EndSpan(ctx, rootSpan, apiErr) }()
 
 ## 5. Span Names and Attributes
 
-All Span names and attribute keys are constants in `pkg/tracing/spans.go`.
+All Span names and attribute keys are constants in `pkg/tracing/span.go`.
 **Never use string literals at call sites** — add a constant instead.
 
 | Constant prefix | Component | Examples |
@@ -163,10 +163,10 @@ Naming convention: `{layer}.{OperationName}` for Spans, `{noun}.{field}`
 
 Adding a new instrumented operation:
 
-1. Add a `Span...` constant (and any new `Attr...` keys) to `spans.go`.
+1. Add a `Span...` constant (and any new `Attr...` keys) to `span.go`.
 2. Instrument with the matching pattern from Section 4. That's all: whether
    the enclosing Reconcile is retained is handled automatically by the
-   write-tracking client (`NewWriteTrackingClient` in `client.go`), which
+   write-tracking client (`NewWriteTrackingClient` in `processor.go`), which
    marks the iteration on every Kubernetes write — there is no registry to
    update and no marking API to call.
 

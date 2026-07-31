@@ -25,6 +25,92 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// Span name constants for sandbox-manager.
+const (
+	SpanManagerClaimSandbox      = "manager.ClaimSandbox"
+	SpanManagerCloneSandbox      = "manager.CloneSandbox"
+	SpanManagerDeleteSandbox     = "manager.DeleteSandbox"
+	SpanManagerPauseSandbox      = "manager.PauseSandbox"
+	SpanManagerResumeSandbox     = "manager.ResumeSandbox"
+	SpanManagerCreateSnapshot    = "manager.CreateSnapshot"
+	SpanManagerWaitForCheckpoint = "manager.WaitForCheckpoint"
+
+	SpanInfraClaimSandbox     = "infra.ClaimSandbox"
+	SpanInfraCloneSandbox     = "infra.CloneSandbox"
+	SpanInfraCreateCheckpoint = "infra.CreateCheckpoint"
+	SpanInfraProcessCSIMounts = "infra.ProcessCSIMounts"
+	SpanInfraPause            = "infra.Pause"
+	SpanInfraResume           = "infra.Resume"
+	SpanInfraKill             = "infra.Kill"
+
+	SpanProxySyncRoute = "proxy.syncRoute"
+)
+
+// Span name constants for sandbox-controller. All controller Span names are
+// purely observational: they decide what shows up as a named segment in trace
+// UIs, never whether the Reconcile iteration is retained. Retention is decided
+// by the write-tracking client (see NewWriteTrackingClient in processor.go)
+// and by failures alone.
+const (
+	SpanControllerReconcile             = "controller.Reconcile"
+	SpanControllerEnsureSandboxRunning  = "controller.EnsureSandboxRunning"
+	SpanControllerEnsureSandboxUpdated  = "controller.EnsureSandboxUpdated"
+	SpanControllerEnsureSandboxPaused   = "controller.EnsureSandboxPaused"
+	SpanControllerEnsureSandboxResumed  = "controller.EnsureSandboxResumed"
+	SpanControllerEnsureSandboxUpgraded = "controller.EnsureSandboxUpgraded"
+	SpanControllerEnsureSandboxRecycled = "controller.EnsureSandboxRecycled"
+	SpanControllerCreatePod             = "controller.CreatePod"
+	SpanControllerDeletePod             = "controller.DeletePod"
+	SpanControllerPatchPod              = "controller.PatchPod"
+	SpanControllerCreatePVC             = "controller.CreatePVC"
+	SpanControllerPatchSandbox          = "controller.PatchSandbox"
+	SpanControllerDeleteSandbox         = "controller.DeleteSandbox"
+	SpanControllerRemoveFinalizer       = "controller.RemoveFinalizer"
+	SpanControllerCheckpoint            = "controller.Checkpoint"
+	SpanControllerAgentRuntimeInit      = "controller.AgentRuntimeInit"
+	SpanControllerUpdateStatus          = "controller.updateSandboxStatus"
+
+	// SpanControllerAssumePodCheckpointed covers the checkpoint validation flow
+	// before pod deletion on pause (image validation + checkpoint polling).
+	SpanControllerAssumePodCheckpointed = "controller.AssumePodCheckpointed"
+	// SpanControllerCheckpointCleanup covers pod-info checkpoint cleanup; each
+	// actual deletion inside is traced by SpanControllerDeleteCheckpoint.
+	SpanControllerCheckpointCleanup = "controller.CheckpointCleanup"
+	SpanControllerDeleteCheckpoint  = "controller.DeleteCheckpoint"
+)
+
+// Attribute key constants for Spans.
+const (
+	// AttrRequestID carries the normalized request ID on the manager root Span.
+	AttrRequestID        = "request.id"
+	AttrSandboxID        = "sandbox.id"
+	AttrSandboxName      = "sandbox.name"
+	AttrSandboxNamespace = "sandbox.namespace"
+	AttrSandboxPhase     = "sandbox.phase"
+	AttrCheckpointName   = "checkpoint.name"
+	// AttrCheckpointRejected records whether AssumePodCheckpointed rejected the
+	// pause (validation failed or checkpoint not yet complete).
+	AttrCheckpointRejected  = "checkpoint.rejected"
+	AttrPhaseAfter          = "phase.after"
+	AttrClaimLockType       = "claim.lock_type"
+	AttrClaimRetries        = "claim.retries"
+	AttrClaimDuration       = "claim.duration"
+	AttrCloneCheckpointID   = "clone.checkpoint_id"
+	AttrSnapshotKeepRunning = "snapshot.keep_running"
+	AttrSnapshotTTL         = "snapshot.ttl"
+	AttrCheckpointDuration  = "checkpoint.duration"
+	AttrCSIVolumeCount      = "csi.volume_count"
+	AttrCSIDrivers          = "csi.drivers"
+	AttrRouteID             = "route.id"
+	AttrPeersSynced         = "peers.synced"
+	AttrReuseTriggered      = "reuse.triggered"
+
+	// AttrReconcileNoop marks a Reconcile (or its EnsureSandbox* child) Span that
+	// performed no real write operation. Spans carrying this attribute are dropped
+	// by FilteringSpanProcessor to keep empty Reconcile iterations out of traces.
+	AttrReconcileNoop = "reconcile.noop"
+)
+
 // Tracer scope names used by the Start* helpers below. Keeping them private
 // to this package guarantees every span carries the right otel.scope.name in
 // trace UIs, telling which component emitted it.
@@ -113,12 +199,12 @@ func StartReconcileSpan(ctx context.Context, obj client.Object) (context.Context
 //     valid parent Span (tracing disabled, or called outside a traced entry
 //     point), a no-op Span is returned so instrumentation stays zero-cost and
 //     never creates orphan root Spans.
-//   - name: Span name; use one of the SpanController* constants from spans.go.
+//   - name: Span name; use one of the SpanController* constants in this file.
 //     Span names are purely observational: whether the enclosing Reconcile is
 //     retained is decided by the write-tracking client (any Kubernetes write)
 //     and by failures, never by which Spans were created.
 //   - attrs: optional attributes built with attribute.String/Int/... and the
-//     Attr* keys from spans.go.
+//     Attr* keys in this file.
 //
 // Returns the context carrying the new Span (pass it to the instrumented
 // call) and the Span itself (pass it to EndSpan).
@@ -183,9 +269,9 @@ func StartManagerRootSpan(ctx context.Context, name, requestID string) (context.
 //   - ctx: context carrying the parent Span, e.g. the one installed by
 //     StartManagerRootSpan or an enclosing StartManagerSpan.
 //   - name: Span name; use one of the SpanManager*/SpanInfra*/SpanProxy*
-//     constants from spans.go.
+//     constants in this file.
 //   - attrs: optional attributes built with attribute.String/Int/... and the
-//     Attr* keys from spans.go.
+//     Attr* keys in this file.
 //
 // Returns the context carrying the new Span (pass it to the instrumented
 // call) and the Span itself (pass it to EndSpan).

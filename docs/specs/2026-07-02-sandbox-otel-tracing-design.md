@@ -159,7 +159,7 @@ root Span name can be mapped per route inside `RegisterRoute`.
 
 ---
 
-## Component 4: `pkg/tracing/reconcile.go`
+## Component 4: `pkg/tracing/span.go`
 
 ### Purpose
 
@@ -551,7 +551,7 @@ checkpoint.Annotations = tracing.InjectTraceContext(ctx, checkpoint.Annotations)
 
 ### Phase 1: Core Package
 
-1. Create `pkg/tracing/` package (`provider.go`, `propagator.go`, `spans.go`, `doc.go`)
+1. Create `pkg/tracing/` package (`provider.go`, `propagator.go`, `span.go`, `doc.go`)
 2. Add go.mod dependencies and `go mod vendor`
 3. Write provider and propagator unit tests
 
@@ -564,7 +564,7 @@ checkpoint.Annotations = tracing.InjectTraceContext(ctx, checkpoint.Annotations)
 
 ### Phase 3: sandbox-controller Integration
 
-1. Add `reconcile.go` (`StartReconcileSpan`, `StartControllerSpan`, `EndSpan`)
+1. Add the instrumentation API in `span.go` (`StartReconcileSpan`, `StartControllerSpan`, `EndSpan`)
 2. Add Reconcile Span in `pkg/controller/sandbox/sandbox_controller.go`
 3. Add child Spans in `pkg/controller/sandbox/core/common_control.go`
 4. Add feature gate in `pkg/features/features.go`
