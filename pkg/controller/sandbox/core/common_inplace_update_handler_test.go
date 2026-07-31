@@ -843,8 +843,8 @@ func TestHandleInPlaceUpdateCommon_RevisionMatchCompletedSucceeded(t *testing.T)
 
 func TestHandleInPlaceUpdateCommon_AlreadySucceededIdempotent(t *testing.T) {
 	// Revision matches and the InplaceUpdate condition is already Succeeded
-	// → idempotent no-op: done=true (caller continues status sync); newStatus
-	// is unchanged, so updateSandboxStatus short-circuits and the Reconcile
+	// → isInplaceUpdateTerminal short-circuits: done=true, newStatus untouched,
+	// so the caller's updateSandboxStatus makes no write and the Reconcile
 	// stays eligible for no-op filtering.
 	ctx := context.Background()
 

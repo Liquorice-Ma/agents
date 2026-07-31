@@ -84,23 +84,12 @@ func handleInPlaceUpdateCommon(
 
 	// Check if revision is consistent
 	if pod.Labels[agentsv1alpha1.PodLabelTemplateHash] == newStatus.UpdateRevision {
-		// Idempotent early exit: if the InplaceUpdate condition is already
-		// Succeeded, the inplace update was completed in a previous Reconcile.
-		// Skip re-evaluating completion and re-setting the condition. Return
-		// done=true so the caller continues with the regular status sync;
-		// newStatus is unchanged, so updateSandboxStatus short-circuits and
-		// this no-op Reconcile stays eligible for no-op filtering.
-		existingCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
-		if existingCond != nil && existingCond.Status == metav1.ConditionTrue &&
-			existingCond.Reason == agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded {
-			return true, nil
-		}
-
-		// If the InplaceUpdate condition is already in a terminal failure state
-		// (e.g., resize subresource not available, infeasible, deferred), skip
-		// re-evaluation. When the resize subresource call fails, the pod spec is
-		// never updated, so spec==status (both old values) would cause
-		// isPodResourceResizeCompleted to falsely report completion.
+		// If the InplaceUpdate condition is already in a terminal state
+		// (Succeeded, or a failure such as resize subresource not available,
+		// infeasible, deferred), skip re-evaluation. When the resize subresource
+		// call fails, the pod spec is never updated, so spec==status (both old
+		// values) would cause isPodResourceResizeCompleted to falsely report
+		// completion.
 		if isInplaceUpdateTerminal(newStatus) {
 			return true, nil
 		}
