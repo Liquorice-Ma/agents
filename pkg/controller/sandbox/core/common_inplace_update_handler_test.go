@@ -1499,7 +1499,7 @@ func TestIsMetadataOnlyChange(t *testing.T) {
 						Image: "nginx:latest",
 						Resources: corev1.ResourceRequirements{
 							Requests: corev1.ResourceList{
-								corev1.ResourceCPU: resource.MustParse("200m"),
+								corev1.ResourceCPU: resource.MustParse("50m"),
 							},
 						},
 					}},
