@@ -320,6 +320,18 @@ func lockPickedSandbox(ctx context.Context, sbx *Sandbox, lockType infra.LockTyp
 func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType infra.LockType, opts infra.ClaimSandboxOptions,
 	cache infracache.Provider, metrics *infra.ClaimMetrics) error {
 	log := klog.FromContext(ctx)
+
+	// Resolve the runtime transport (TLS or plaintext) once so both the
+	// /init handshake and the CSI re-mount below use the same channel. A
+	// resolution failure means the sandbox declares the TLS capability while
+	// this manager cannot honor it, which is a configuration error: return it
+	// as non-retriable rather than silently downgrading to plaintext.
+	rtOpts, err := runtime.TransportOptionsFor(sbx.Sandbox, opts.RuntimeTLSBundle)
+	if err != nil {
+		log.Error(err, "failed to resolve runtime transport")
+		return err
+	}
+
 	if lockType == infra.LockTypeCreate || lockType == infra.LockTypeSpeculate || opts.InplaceUpdate != nil {
 		log.Info("should wait for sandbox ready", "inplaceUpdate", opts.InplaceUpdate != nil)
 		var err error
@@ -335,7 +347,7 @@ func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType infra.Loc
 	if opts.InitRuntime != nil {
 		log.Info("starting to init runtime", "opts", opts.InitRuntime)
 		var err error
-		metrics.InitRuntime, err = runtime.InitRuntime(ctx, sbx.Sandbox, *opts.InitRuntime, sbx.refreshFunc())
+		metrics.InitRuntime, err = runtime.InitRuntime(ctx, sbx.Sandbox, *opts.InitRuntime, sbx.refreshFunc(), rtOpts...)
 		if err != nil {
 			log.Error(err, "failed to init runtime")
 			return retriableError{Message: fmt.Sprintf("failed to init runtime: %s", err)}
@@ -384,7 +396,7 @@ func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType infra.Loc
 	if opts.CSIMount != nil {
 		log.Info("starting to perform csi mount")
 		var err error
-		metrics.CSIMount, err = traceCSIMounts(ctx, sbx.Sandbox, *opts.CSIMount)
+		metrics.CSIMount, err = traceCSIMounts(ctx, sbx.Sandbox, *opts.CSIMount, rtOpts...)
 		if err != nil {
 			log.Error(err, "failed to perform csi mount")
 			return fmt.Errorf("failed to perform csi mount: %s", err)

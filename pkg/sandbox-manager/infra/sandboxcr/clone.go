@@ -155,6 +155,18 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 		clearFailedSandbox(ctx, created, err, opts.ReserveFailedSandboxFor, opts.Admission, opts.LockString)
 	}()
 
+	// Resolve the runtime transport (TLS or plaintext) once so both the
+	// re-init handshake and the CSI re-mount below use the same channel. A
+	// resolution failure means the sandbox declares the TLS capability while
+	// this manager cannot honor it, which is a configuration error: surface it
+	// instead of silently downgrading to plaintext.
+	rtOpts, rtErr := runtime.TransportOptionsFor(sbx.Sandbox, opts.RuntimeTLSBundle)
+	if rtErr != nil {
+		log.Error(rtErr, "failed to resolve runtime transport")
+		err = rtErr
+		return
+	}
+
 	// Step 4: wait for sandbox ready
 	if metrics, err = cloneWaitSandboxReady(ctx, sbx, opts, cache, metrics); err != nil {
 		// Preserve context cancellation / deadline so the outer retry loop can
@@ -166,7 +178,7 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 	}
 
 	// Step 5: re-init runtime
-	if metrics, err = cloneReInitRuntime(ctx, sbx, opts, initRuntimeOpts, metrics); err != nil {
+	if metrics, err = cloneReInitRuntime(ctx, sbx, opts, initRuntimeOpts, metrics, rtOpts...); err != nil {
 		if !wait.Interrupted(err) {
 			err = retriableError{Message: fmt.Sprintf("failed to init runtime: %s", err)}
 		}
@@ -199,7 +211,7 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 	}
 	if opts.CSIMount != nil {
 		log.Info("starting to perform csi mount")
-		metrics.CSIMount, err = traceCSIMounts(ctx, sbx.Sandbox, *opts.CSIMount)
+		metrics.CSIMount, err = traceCSIMounts(ctx, sbx.Sandbox, *opts.CSIMount, rtOpts...)
 		metrics.Total += metrics.CSIMount
 		if err != nil {
 			log.Error(err, "failed to perform csi mount")
@@ -351,7 +363,7 @@ func cloneWaitSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.CloneSa
 }
 
 // cloneReInitRuntime re-initializes the runtime if needed
-func cloneReInitRuntime(ctx context.Context, sbx *Sandbox, opts infra.CloneSandboxOptions, initRuntimeOpts *config.InitRuntimeOptions, metrics infra.CloneMetrics) (infra.CloneMetrics, error) {
+func cloneReInitRuntime(ctx context.Context, sbx *Sandbox, opts infra.CloneSandboxOptions, initRuntimeOpts *config.InitRuntimeOptions, metrics infra.CloneMetrics, rtOpts ...runtime.Option) (infra.CloneMetrics, error) {
 	log := klog.FromContext(ctx).WithValues("checkpointID", opts.CheckPointID, "step", "5.reInitRuntime")
 	if initRuntimeOpts == nil {
 		return metrics, nil
@@ -359,7 +371,7 @@ func cloneReInitRuntime(ctx context.Context, sbx *Sandbox, opts infra.CloneSandb
 	initRuntimeOpts.ReInit = true
 	log.Info("re-init runtime")
 	var err error
-	metrics.InitRuntime, err = runtime.InitRuntime(ctx, sbx.Sandbox, *initRuntimeOpts, sbx.refreshFunc())
+	metrics.InitRuntime, err = runtime.InitRuntime(ctx, sbx.Sandbox, *initRuntimeOpts, sbx.refreshFunc(), rtOpts...)
 	metrics.Total += metrics.InitRuntime
 	if err != nil {
 		log.Error(err, "failed to init runtime")

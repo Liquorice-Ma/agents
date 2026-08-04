@@ -79,6 +79,7 @@ func NewCommonControl(args SandboxControlArgs) SandboxControl {
 		apiReader:       args.APIReader,
 		storageRegistry: storages.NewStorageProvider(),
 		recorder:        args.Recorder,
+		tlsBundle:       args.RuntimeTLSBundle,
 	}
 	control := &commonControl{
 		Client:               args.Client,
@@ -107,7 +108,7 @@ func (r *commonControl) EnsureSandboxRunning(ctx context.Context, args EnsureFun
 		if requeueAfter, shouldReturn := r.rateLimiter.getRateLimitDuration(ctx, pod, box); shouldReturn {
 			return requeueAfter, nil
 		}
-		_, err := r.podControl.CreatePod(ctx, CreatePodArgs{Box: box, NewStatus: newStatus})
+		_, err := r.podControl.CreatePod(ctx, CreatePodArgs{Box: box, NewStatus: newStatus, AdvertiseRuntimeTLS: true})
 		return 0, err
 	}
 

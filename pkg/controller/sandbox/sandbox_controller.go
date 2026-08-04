@@ -47,6 +47,7 @@ import (
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
+	runtimeclient "github.com/openkruise/agents/pkg/utils/runtime"
 	timeoututils "github.com/openkruise/agents/pkg/utils/timeout"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -111,7 +112,10 @@ type Enqueuer interface {
 	Enqueue(namespace, name string)
 }
 
-func Add(mgr manager.Manager, metricsCleanup Enqueuer) error {
+// Add registers the sandbox controller. runtimeTLSBundle is the client TLS
+// bundle for reaching TLS-capable agent-runtimes; nil disables runtime TLS
+// for this controller (all sandboxes are served over the legacy paths).
+func Add(mgr manager.Manager, metricsCleanup Enqueuer, runtimeTLSBundle *runtimeclient.TLSBundle) error {
 	if !utilfeature.DefaultFeatureGate.Enabled(features.SandboxGate) || !discovery.DiscoverGVK(sandboxControllerKind) {
 		return nil
 	}
@@ -129,6 +133,10 @@ func Add(mgr manager.Manager, metricsCleanup Enqueuer) error {
 	checkpointControl := core.NewCheckpointControl(cli, recorder)
 	podControl := core.NewPodControl(cli, recorder, core.GeneratePodFromSandbox)
 	podControl.SetCheckpointIDAnnotationKey(checkpointIDAnnotationKey)
+	// The runtime client TLS material is the single switch for runtime HTTPS:
+	// it both enables the client side (below) and lets new pods advertise the
+	// capability, so a stamped sandbox is always one this controller can reach.
+	podControl.SetAdvertiseRuntimeTLS(runtimeTLSBundle != nil)
 	err := (&SandboxReconciler{
 		Client:            cli,
 		Scheme:            mgr.GetScheme(),
@@ -140,6 +148,7 @@ func Add(mgr manager.Manager, metricsCleanup Enqueuer) error {
 			RateLimiter:       rateLimiter,
 			CheckpointControl: checkpointControl,
 			PodControl:        podControl,
+			RuntimeTLSBundle:  runtimeTLSBundle,
 			RecycleConfig: core.SandboxRecycleConfig{
 				Timeout:                recycleTimeout,
 				GracePeriod:            recycleGracePeriod,
