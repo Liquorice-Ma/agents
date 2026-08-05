@@ -321,17 +321,6 @@ func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType infra.Loc
 	cache infracache.Provider, metrics *infra.ClaimMetrics) error {
 	log := klog.FromContext(ctx)
 
-	// Resolve the runtime transport (TLS or plaintext) once so both the
-	// /init handshake and the CSI re-mount below use the same channel. A
-	// resolution failure means the sandbox declares the TLS capability while
-	// this manager cannot honor it, which is a configuration error: return it
-	// as non-retriable rather than silently downgrading to plaintext.
-	rtOpts, err := runtime.TransportOptionsFor(sbx.Sandbox, opts.RuntimeTLSBundle)
-	if err != nil {
-		log.Error(err, "failed to resolve runtime transport")
-		return err
-	}
-
 	if lockType == infra.LockTypeCreate || lockType == infra.LockTypeSpeculate || opts.InplaceUpdate != nil {
 		log.Info("should wait for sandbox ready", "inplaceUpdate", opts.InplaceUpdate != nil)
 		var err error
@@ -342,6 +331,22 @@ func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType infra.Loc
 			return retriableError{Message: fmt.Sprintf("failed to wait for sandbox ready: %s", err)}
 		}
 		log.Info("sandbox is ready", "cost", metrics.WaitReady)
+	}
+
+	// Resolve the per-sandbox runtime transport once for both runtime calls
+	// below (init handshake and CSI mounts). This MUST run after the wait-ready
+	// gate so the sandbox already advertises the capabilities of the pod that
+	// actually runs it: the controller stamps AnnotationRuntimeTLSPort before
+	// creating the pod and waitForSandboxReady refreshes this object, so
+	// resolving any earlier reads a pre-stamp snapshot and silently selects
+	// plaintext for a TLS-only runtime. A resolution failure means the sandbox
+	// declares the TLS capability while this manager cannot honor it, which is a
+	// configuration error: return it as non-retriable rather than silently
+	// downgrading to plaintext.
+	rtOpts, err := runtime.TransportOptionsFor(sbx.Sandbox, opts.RuntimeTLSBundle)
+	if err != nil {
+		log.Error(err, "failed to resolve runtime transport")
+		return err
 	}
 
 	if opts.InitRuntime != nil {

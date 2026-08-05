@@ -155,18 +155,6 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 		clearFailedSandbox(ctx, created, err, opts.ReserveFailedSandboxFor, opts.Admission, opts.LockString)
 	}()
 
-	// Resolve the runtime transport (TLS or plaintext) once so both the
-	// re-init handshake and the CSI re-mount below use the same channel. A
-	// resolution failure means the sandbox declares the TLS capability while
-	// this manager cannot honor it, which is a configuration error: surface it
-	// instead of silently downgrading to plaintext.
-	rtOpts, rtErr := runtime.TransportOptionsFor(sbx.Sandbox, opts.RuntimeTLSBundle)
-	if rtErr != nil {
-		log.Error(rtErr, "failed to resolve runtime transport")
-		err = rtErr
-		return
-	}
-
 	// Step 4: wait for sandbox ready
 	if metrics, err = cloneWaitSandboxReady(ctx, sbx, opts, cache, metrics); err != nil {
 		// Preserve context cancellation / deadline so the outer retry loop can
@@ -174,6 +162,23 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 		if !wait.Interrupted(err) {
 			err = retriableError{Message: fmt.Sprintf("failed to wait for sandbox ready: %s", err)}
 		}
+		return
+	}
+
+	// Resolve the per-sandbox runtime transport once for the runtime calls below
+	// (re-init handshake and CSI mounts). This MUST run after the wait-ready gate
+	// so the cloned sandbox already advertises the capabilities of the pod that
+	// actually runs it: a checkpoint does not carry the runtime TLS port
+	// annotation, so the clone only gets it when the controller stamps it while
+	// creating the pod, and cloneWaitSandboxReady refreshes this object. Resolving
+	// any earlier reads a pre-stamp snapshot and silently selects plaintext for a
+	// TLS-only runtime. A resolution failure means the sandbox declares the TLS
+	// capability while this manager cannot honor it, which is a configuration
+	// error: surface it instead of silently downgrading to plaintext.
+	rtOpts, rtErr := runtime.TransportOptionsFor(sbx.Sandbox, opts.RuntimeTLSBundle)
+	if rtErr != nil {
+		log.Error(rtErr, "failed to resolve runtime transport")
+		err = rtErr
 		return
 	}
 
