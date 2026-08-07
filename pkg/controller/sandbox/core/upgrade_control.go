@@ -39,7 +39,7 @@ const (
 	EventUpgradeResumed           = "UpgradeResumed"
 	EventUpgradePreUpgradeFailed  = "PreUpgradeFailed"
 	EventUpgradePodReplaced       = "UpgradePodReplaced"
-	EventUpgradePodUpdatedInPlace = "UpgradePodUpdatedInPlace"
+	EventUpgradePodInplaceUpdate  = "UpgradePodInplaceUpdate"
 	EventUpgradePodFailed         = "UpgradePodFailed"
 	EventUpgradePostUpgradeFailed = "PostUpgradeFailed"
 	EventUpgradeSucceeded         = "UpgradeSucceeded"
@@ -107,7 +107,7 @@ func (r *UpgradeControl) recordUpgradeEvent(box *agentsv1alpha1.Sandbox, eventTy
 // delete the old pod and create a new one during the UpgradePod step.
 //
 // InplaceUpdate is deliberately excluded: it also runs the upgrade lifecycle,
-// but patches the existing pod instead of replacing it. Use RequiresUpgradePhase
+// but patches the existing pod instead of replacing it. Use RequiresUpgradeSandbox
 // to decide whether the sandbox enters the Upgrading phase at all.
 func RequiresPodReplacementUpgrade(box *agentsv1alpha1.Sandbox) bool {
 	return box.Spec.UpgradePolicy != nil &&
@@ -115,7 +115,7 @@ func RequiresPodReplacementUpgrade(box *agentsv1alpha1.Sandbox) bool {
 			box.Spec.UpgradePolicy.Type == agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore)
 }
 
-// RequiresUpgradePhase returns true when the sandbox's upgrade policy drives the
+// RequiresUpgradeSandbox returns true when the sandbox's upgrade policy drives the
 // sandbox through the Upgrading phase and its lifecycle state machine
 // (PreUpgrade → Checkpointing → UpgradePod → PostUpgrade).
 //
@@ -125,7 +125,7 @@ func RequiresPodReplacementUpgrade(box *agentsv1alpha1.Sandbox) bool {
 // hooks run. A sandbox without an upgrade policy does not enter the phase; a
 // template change on that path is applied in place from the Running phase,
 // which is what the SandboxClaim delivery flow depends on.
-func RequiresUpgradePhase(box *agentsv1alpha1.Sandbox) bool {
+func RequiresUpgradeSandbox(box *agentsv1alpha1.Sandbox) bool {
 	if box.Spec.UpgradePolicy == nil {
 		return false
 	}
@@ -389,7 +389,7 @@ func (r *UpgradeControl) executeUpgradePodStep(ctx context.Context, args EnsureF
 			return nil, false, nil
 		}
 		klog.InfoS("In-place UpgradePod step completed, transitioning to PostUpgrade", "sandbox", klog.KObj(box))
-		r.recordUpgradeEvent(box, corev1.EventTypeNormal, EventUpgradePodUpdatedInPlace, "Pod updated in place successfully, proceeding to PostUpgrade")
+		r.recordUpgradeEvent(box, corev1.EventTypeNormal, EventUpgradePodInplaceUpdate, "Pod updated in place successfully, proceeding to PostUpgrade")
 		// The pod was patched rather than replaced, so the pod reference stays valid
 		// and no re-fetch or re-initialization is required.
 		return args.Pod, true, nil

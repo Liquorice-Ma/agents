@@ -565,7 +565,7 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 		// Sandboxes without an upgrade policy never enter Upgrading: their template
 		// changes are applied in place from the Running phase (the SandboxClaim path).
 		if newStatus.UpdateRevision != box.Status.UpdateRevision &&
-			core.RequiresUpgradePhase(box) {
+			core.RequiresUpgradeSandbox(box) {
 			klog.FromContext(ctx).Info("Detected upgrade trigger", "sandbox", klog.KObj(box),
 				"oldRevision", box.Status.UpdateRevision,
 				"newRevision", newStatus.UpdateRevision)
@@ -598,7 +598,7 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 			// sandbox has no pod (EnsureSandboxPaused deletes it), so detect
 			// the template change via the revision hash instead of pod labels.
 			if newStatus.UpdateRevision != box.Status.UpdateRevision &&
-				core.RequiresUpgradePhase(box) {
+				core.RequiresUpgradeSandbox(box) {
 				klog.FromContext(ctx).Info("Detected upgrade trigger", "sandbox", klog.KObj(box),
 					"oldRevision", box.Status.UpdateRevision,
 					"newRevision", newStatus.UpdateRevision)

@@ -158,6 +158,71 @@ func TestApplySandboxPatch_InplaceUpdateSetsInplacePolicy(t *testing.T) {
 	assert.Equal(t, agentsv1alpha1.SandboxUpgradePolicyInplaceUpdate, updated.Spec.UpgradePolicy.Type)
 }
 
+func TestApplySandboxPatch_CheckpointRestoreSetsCheckpointRestorePolicy(t *testing.T) {
+	ops := &agentsv1alpha1.SandboxUpdateOps{
+		ObjectMeta: metav1.ObjectMeta{Name: "ops-1", Namespace: "default"},
+		Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
+			UpdateStrategy: agentsv1alpha1.SandboxUpdateOpsStrategy{
+				Type: agentsv1alpha1.SandboxUpdateOpsStrategyCheckpointRestore,
+			},
+		},
+	}
+	sbx := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sbx-1",
+			Namespace: "default",
+			Labels:    map[string]string{"app": "test"},
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: "main", Image: "busybox"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	r := newTestReconciler(sbx)
+	err := r.applySandboxPatch(context.Background(), sbx, ops)
+	assert.NoError(t, err)
+
+	updated := &agentsv1alpha1.Sandbox{}
+	err = r.Get(context.Background(), types.NamespacedName{Name: "sbx-1", Namespace: "default"}, updated)
+	assert.NoError(t, err)
+	require.NotNil(t, updated.Spec.UpgradePolicy)
+	assert.Equal(t, agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore, updated.Spec.UpgradePolicy.Type)
+}
+
+func TestValidateInplaceUpdateFeasible_EmptyInputReturnsEmpty(t *testing.T) {
+	ops := &agentsv1alpha1.SandboxUpdateOps{
+		Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
+			Patch: runtime.RawExtension{Raw: []byte(`{"spec":{"containers":[{"name":"main","image":"v2"}]}}`)},
+		},
+	}
+	// A sandbox without an inline template short-circuits: nothing can change
+	// the immutable part.
+	sbxNoTemplate := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "sbx-1", Namespace: "default"},
+		Spec:       agentsv1alpha1.SandboxSpec{},
+	}
+	assert.Empty(t, validateInplaceUpdateFeasible(sbxNoTemplate, ops))
+
+	// An empty patch also short-circuits.
+	sbx := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "sbx-1", Namespace: "default"},
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{},
+			},
+		},
+	}
+	assert.Empty(t, validateInplaceUpdateFeasible(sbx, &agentsv1alpha1.SandboxUpdateOps{}))
+}
+
 func TestApplySandboxPatch_CopiesLifecycle(t *testing.T) {
 	lifecycle := &agentsv1alpha1.SandboxLifecycle{
 		PreUpgrade: &agentsv1alpha1.UpgradeAction{

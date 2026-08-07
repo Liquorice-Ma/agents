@@ -290,6 +290,36 @@ func TestHandle_DecodeFailure(t *testing.T) {
 	require.Equal(t, int32(400), resp.Result.Code)
 }
 
+func TestValidateInplacePatchAllowedFields(t *testing.T) {
+	tests := []struct {
+		name      string
+		raw       string
+		wantEmpty bool
+		wantSub   string
+	}{
+		{name: "invalid JSON", raw: "{bad", wantSub: "failed to parse patch"},
+		{name: "top-level null skipped", raw: `{"spec":null}`, wantEmpty: true},
+		{name: "metadata null skipped", raw: `{"metadata":null}`, wantEmpty: true},
+		{name: "metadata not object", raw: `{"metadata":"x"}`, wantSub: "metadata must be a JSON object"},
+		{name: "spec not object", raw: `{"spec":"x"}`, wantSub: "spec must be a JSON object"},
+		{name: "spec.containers not array", raw: `{"spec":{"containers":"x"}}`, wantSub: "spec.containers must be a JSON array"},
+		{name: "container item not object", raw: `{"spec":{"containers":["x"]}}`, wantSub: "spec.containers[0] must be a JSON object"},
+		{name: "container field null skipped", raw: `{"spec":{"containers":[{"image":null}]}}`, wantEmpty: true},
+		{name: "allowed image patch", raw: `{"spec":{"containers":[{"name":"main","image":"v2"}]}}`, wantEmpty: true},
+		{name: "forbidden env field", raw: `{"spec":{"containers":[{"name":"main","env":[]}]}}`, wantSub: "does not support modifying spec.containers[0].env"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := validateInplacePatchAllowedFields([]byte(tt.raw))
+			if tt.wantEmpty {
+				require.Empty(t, msg, "expected no violation for %q", tt.name)
+				return
+			}
+			require.Contains(t, msg, tt.wantSub, "unexpected violation for %q", tt.name)
+		})
+	}
+}
+
 func TestHandle_DeleteOperation_Allowed(t *testing.T) {
 	obj := validOps()
 	raw, err := json.Marshal(obj)

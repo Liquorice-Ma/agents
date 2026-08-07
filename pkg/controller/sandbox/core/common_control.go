@@ -161,7 +161,7 @@ func (r *commonControl) EnsureSandboxUpdated(ctx context.Context, args EnsureFun
 	// delivery path: the sandbox must stay Running so the claim can be served.
 	// Every explicit upgrade policy — including InplaceUpdate — is excluded here
 	// because it runs through the Upgrading phase instead.
-	if !RequiresUpgradePhase(box) {
+	if !RequiresUpgradeSandbox(box) {
 		done, err := r.handleInplaceUpdateSandbox(ctx, args)
 		if err != nil {
 			return err

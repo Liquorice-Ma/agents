@@ -3389,6 +3389,60 @@ func TestCalculateStatus(t *testing.T) {
 			},
 		},
 		{
+			// A paused sandbox with an InplaceUpdate policy and a changed revision
+			// upgrades while paused: it enters Upgrading, drops the stale
+			// InplaceUpdate condition, but keeps the Paused condition (the Resuming
+			// stage relies on it to wake the sandbox before upgrading).
+			name: "paused phase with inplace policy and revision change transitions to upgrading",
+			pod:  nil,
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-sandbox",
+					Namespace:  "default",
+					Generation: 1,
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					Paused: true,
+					UpgradePolicy: &agentsv1alpha1.SandboxUpgradePolicy{
+						Type: agentsv1alpha1.SandboxUpgradePolicyInplaceUpdate,
+					},
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "test", Image: "nginx:v2"}},
+							},
+						},
+					},
+				},
+			},
+			initStatus: &agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxPaused,
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(agentsv1alpha1.SandboxConditionPaused),
+						Status:             metav1.ConditionTrue,
+						LastTransitionTime: metav1.Now(),
+					},
+					{
+						Type:               string(agentsv1alpha1.SandboxConditionInplaceUpdate),
+						Status:             metav1.ConditionFalse,
+						Reason:             agentsv1alpha1.SandboxInplaceUpdateReasonFailed,
+						Message:            "previous round failed",
+						LastTransitionTime: metav1.Now(),
+					},
+				},
+			},
+			expectedPhase:     agentsv1alpha1.SandboxUpgrading,
+			expectedShouldReq: false,
+			checkConditions: func(t *testing.T, status *agentsv1alpha1.SandboxStatus) {
+				for _, cond := range status.Conditions {
+					if cond.Type == string(agentsv1alpha1.SandboxConditionInplaceUpdate) {
+						t.Errorf("stale InplaceUpdate condition should be removed when upgrading a paused sandbox")
+					}
+				}
+			},
+		},
+		{
 			// Without an upgrade policy the sandbox stays Running and applies the
 			// change in place: this is the SandboxClaim delivery path, which breaks
 			// if the sandbox leaves Running.
