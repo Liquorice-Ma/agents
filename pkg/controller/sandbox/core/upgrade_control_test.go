@@ -38,9 +38,6 @@ import (
 	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
 )
 
-// SandboxUpgradePolicyInplaceUpdate is a test-only constant for InplaceUpdate upgrade policy type.
-const SandboxUpgradePolicyInplaceUpdate agentsv1alpha1.SandboxUpgradePolicyType = "InplaceUpdate"
-
 // mockLifecycleHookFunc creates a mock LifecycleHookFunc for testing.
 func mockLifecycleHookFunc(exitCode int32, stdout, stderr string, err error) LifecycleHookFunc {
 	return func(ctx context.Context, box *agentsv1alpha1.Sandbox, action *agentsv1alpha1.UpgradeAction) (int32, string, string, error) {
@@ -117,7 +114,7 @@ func newTestCommonControl(hookFunc LifecycleHookFunc, objects ...client.Object) 
 	checkpointCtrl := NewCheckpointControl(fakeClient, record.NewFakeRecorder(100))
 	podCtrl := NewPodControl(fakeClient, record.NewFakeRecorder(100), GeneratePodFromSandbox)
 	initializer := &defaultSandboxInitializer{recorder: record.NewFakeRecorder(10)}
-	return &commonControl{
+	control := &commonControl{
 		Client:               fakeClient,
 		recorder:             record.NewFakeRecorder(100),
 		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
@@ -126,7 +123,82 @@ func newTestCommonControl(hookFunc LifecycleHookFunc, objects ...client.Object) 
 		podControl:           podCtrl,
 		lifecycleHookFunc:    hookFunc,
 		initializer:          initializer,
-		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(100), hookFunc, initializer, defaultSyncStatusFromPod, nil),
+	}
+	control.upgradeControl = NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(100), hookFunc, initializer, defaultSyncStatusFromPod, nil, control.handleInplaceUpdateSandbox)
+	return control
+}
+
+// TestUpgradePolicyPredicates covers the split of responsibilities between the
+// three policy predicates: RequiresUpgradePhase decides whether the sandbox
+// enters the Upgrading phase at all, RequiresPodReplacementUpgrade whether the
+// UpgradePod step replaces the pod, and RequiresInplaceUpgrade whether it
+// patches the pod in place.
+func TestUpgradePolicyPredicates(t *testing.T) {
+	boxWithPolicy := func(policy *agentsv1alpha1.SandboxUpgradePolicy) *agentsv1alpha1.Sandbox {
+		return &agentsv1alpha1.Sandbox{
+			Spec: agentsv1alpha1.SandboxSpec{UpgradePolicy: policy},
+		}
+	}
+	tests := []struct {
+		name               string
+		box                *agentsv1alpha1.Sandbox
+		wantUpgradePhase   bool
+		wantPodReplacement bool
+		wantInplaceUpgrade bool
+	}{
+		{
+			// The SandboxClaim path: no policy means the change is applied in place
+			// from the Running phase, without the upgrade lifecycle.
+			name:               "nil policy",
+			box:                boxWithPolicy(nil),
+			wantUpgradePhase:   false,
+			wantPodReplacement: false,
+			wantInplaceUpgrade: false,
+		},
+		{
+			name:               "empty type",
+			box:                boxWithPolicy(&agentsv1alpha1.SandboxUpgradePolicy{}),
+			wantUpgradePhase:   false,
+			wantPodReplacement: false,
+			wantInplaceUpgrade: false,
+		},
+		{
+			name:               "Recreate",
+			box:                boxWithPolicy(&agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyRecreate}),
+			wantUpgradePhase:   true,
+			wantPodReplacement: true,
+			wantInplaceUpgrade: false,
+		},
+		{
+			name:               "CheckpointRestore",
+			box:                boxWithPolicy(&agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore}),
+			wantUpgradePhase:   true,
+			wantPodReplacement: true,
+			wantInplaceUpgrade: false,
+		},
+		{
+			// InplaceUpdate runs the lifecycle but keeps the pod, so it must be in
+			// the upgrade phase yet out of the pod-replacement path.
+			name:               "InplaceUpdate",
+			box:                boxWithPolicy(&agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyInplaceUpdate}),
+			wantUpgradePhase:   true,
+			wantPodReplacement: false,
+			wantInplaceUpgrade: true,
+		},
+		{
+			name:               "unknown type",
+			box:                boxWithPolicy(&agentsv1alpha1.SandboxUpgradePolicy{Type: "SomethingElse"}),
+			wantUpgradePhase:   false,
+			wantPodReplacement: false,
+			wantInplaceUpgrade: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.wantUpgradePhase, RequiresUpgradePhase(tt.box), "RequiresUpgradePhase")
+			assert.Equal(t, tt.wantPodReplacement, RequiresPodReplacementUpgrade(tt.box), "RequiresPodReplacementUpgrade")
+			assert.Equal(t, tt.wantInplaceUpgrade, RequiresInplaceUpgrade(tt.box), "RequiresInplaceUpgrade")
+		})
 	}
 }
 
@@ -642,7 +714,7 @@ func TestEnsureInplaceUpgrade(t *testing.T) {
 	// Build a sandbox with correct immutable hash for inplace update tests
 	newInplaceSandbox := func() *agentsv1alpha1.Sandbox {
 		box := newUpgradeTestSandbox(nil, &agentsv1alpha1.SandboxUpgradePolicy{
-			Type: SandboxUpgradePolicyInplaceUpdate,
+			Type: agentsv1alpha1.SandboxUpgradePolicyInplaceUpdate,
 		})
 		// Compute and set the correct immutable hash so inplace update logic proceeds
 		_, hashImmutablePart := HashSandbox(box)
@@ -841,7 +913,7 @@ func newTestCommonControlWithCheckpointIndex(hookFunc LifecycleHookFunc, objects
 		podControl:           podCtrl,
 		lifecycleHookFunc:    hookFunc,
 		initializer:          initializer,
-		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(100), hookFunc, initializer, defaultSyncStatusFromPod, nil),
+		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(100), hookFunc, initializer, defaultSyncStatusFromPod, nil, nil),
 	}
 }
 
@@ -1599,7 +1671,7 @@ func TestEnsureSandboxUpgraded_Resuming(t *testing.T) {
 			}
 			return nil
 		}
-		return NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(100), mockLifecycleHookFunc(0, "", "", nil), initializer, defaultSyncStatusFromPod, resumeFn), initializer
+		return NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(100), mockLifecycleHookFunc(0, "", "", nil), initializer, defaultSyncStatusFromPod, resumeFn, nil), initializer
 	}
 
 	tests := []struct {
