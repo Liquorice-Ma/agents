@@ -60,10 +60,7 @@ func (sc *Controller) registerRoutes() {
 	RegisterE2BRoute(sc.mux, http.MethodPut, "/sandboxes/{sandboxID}/network", sc.UpdateSandboxNetwork, sc.CheckApiKey)
 	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/pause", sc.PauseSandbox, traceOperation(traceOpPause), sc.CheckApiKey)
 	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/resume", sc.ResumeSandbox, traceOperation(traceOpResume), sc.CheckApiKey)
-	// Connect is labeled dynamically inside ConnectSandbox: it records
-	// "resume" only when it actually resumes a paused sandbox; connecting to
-	// a running sandbox keeps the default route pattern.
-	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/connect", sc.ConnectSandbox, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/connect", sc.ConnectSandbox, traceOperation(traceOpResume), sc.CheckApiKey)
 	web.RegisterRoute(sc.mux, http.MethodPost, adapters.CustomPrefix+"/api/sandboxes/{sandboxID}/traffic-access-token", sc.RefreshTrafficAccessToken, sc.CheckApiKey)
 	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/timeout", sc.SetSandboxTimeout, sc.CheckApiKey)
 	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/snapshots", sc.CreateSnapshot, sc.CheckApiKey)

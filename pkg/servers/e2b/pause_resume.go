@@ -34,7 +34,6 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
-	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/timeout"
 )
@@ -301,12 +300,6 @@ func (sc *Controller) ConnectSandbox(r *http.Request) (web.ApiResponse[*models.S
 	// placeholder timeout for timed sandboxes.
 	statusCode := http.StatusOK
 	if paused {
-		// This connect actually resumes the sandbox: relabel the trace
-		// operation so every CR write in this request (the resume itself and
-		// the follow-up timeout update) propagates "resume" instead of the
-		// connect route pattern. Connecting to a running sandbox keeps the
-		// default pattern because nothing is resumed.
-		ctx = tracing.WithTraceOperation(ctx, traceOpResume)
 		log.Info("sandbox is paused, will resume it", "reason", pauseResumeReason)
 		resumeOpts := sc.buildResumeOpts(ctx, sbx, autoPause, time.Now(), effectiveTimeout, !currentEndAt.IsZero())
 		if err := sc.manager.ResumeSandbox(ctx, sbx, resumeOpts); err != nil {
