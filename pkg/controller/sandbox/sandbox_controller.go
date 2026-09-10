@@ -308,7 +308,13 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 		))
 	}
 	if traceID := tracing.TraceIDFromContext(ctx); traceID != "" {
-		ctx = klog.NewContext(ctx, klog.FromContext(ctx).WithValues("traceID", traceID))
+		logValues := []any{tracing.TraceIDLogKey, traceID}
+		// Surface the user operation that started this trace (propagated via
+		// baggage in the CR annotation) so logs can be filtered by operation.
+		if op := tracing.TraceOperationFromContext(ctx); op != "" {
+			logValues = append(logValues, tracing.TraceOperationLogKey, op)
+		}
+		ctx = klog.NewContext(ctx, klog.FromContext(ctx).WithValues(logValues...))
 	}
 	// End the Reconcile span with the final Reconcile error via defer: a
 	// failing iteration is marked failed and always retained even when the
