@@ -151,6 +151,9 @@ func InjectTraceContext(ctx context.Context, annotations map[string]string) map[
 	if annotations == nil {
 		annotations = make(map[string]string, 1)
 	}
+	// Empty baggage does not trigger a carrier write. Clear the previous value
+	// before injection so the new trace context cannot inherit a stale operation.
+	delete(annotations, TraceBaggageAnnotationKey)
 	carrier := &annotationCarrier{annotations: annotations}
 	otel.GetTextMapPropagator().Inject(ctx, carrier)
 	return annotations

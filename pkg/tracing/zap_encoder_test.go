@@ -67,12 +67,16 @@ var testTime = time.Date(2026, 8, 11, 11, 46, 3, 0, time.Local)
 func TestTraceFirstEncoderEncodeEntry(t *testing.T) {
 	entry := zapcore.Entry{Level: zapcore.InfoLevel, Message: "update sandbox status success", Time: testTime}
 
-	cases := []struct {
-		name        string
-		fields      []zapcore.Field
-		wantKeys    []string
-		wantTraceID any
-	}{
+	type testCase struct {
+		name           string
+		fields         []zapcore.Field
+		encoderConfig  *zapcore.EncoderConfig
+		contextTraceID string
+		wantKeys       []string
+		wantTraceID    any
+		wantLine       string
+	}
+	cases := []testCase{
 		{
 			name: "trace id in the middle is promoted to the first key",
 			fields: []zapcore.Field{
@@ -126,9 +130,56 @@ func TestTraceFirstEncoderEncodeEntry(t *testing.T) {
 		},
 	}
 
+	for _, ending := range []struct {
+		name   string
+		config zapcore.EncoderConfig
+		suffix string
+	}{
+		{name: "no line ending", config: zapcore.EncoderConfig{SkipLineEnding: true}},
+		{name: "default LF", suffix: "\n"},
+		{name: "CRLF", config: zapcore.EncoderConfig{LineEnding: "\r\n"}, suffix: "\r\n"},
+	} {
+		// Disabling built-in fields makes the real Zap encoder emit an empty object.
+		emptyCase := testCase{
+			name:          "empty object with per-call trace id/" + ending.name,
+			fields:        []zapcore.Field{zap.String(TraceIDLogKey, "tid")},
+			encoderConfig: &ending.config,
+			wantKeys:      []string{TraceIDLogKey},
+			wantTraceID:   "tid",
+			wantLine:      `{"traceID":"tid"}` + ending.suffix,
+		}
+		cases = append(cases, emptyCase)
+
+		emptyCase.name = "empty object with context trace id/" + ending.name
+		emptyCase.fields = nil
+		emptyCase.contextTraceID = "tid"
+		cases = append(cases, emptyCase)
+
+		emptyCase.name = "empty config with remaining field/" + ending.name
+		emptyCase.fields = []zapcore.Field{zap.String("controller", "c")}
+		emptyCase.wantKeys = []string{TraceIDLogKey, "controller"}
+		emptyCase.wantLine = `{"traceID":"tid","controller":"c"}` + ending.suffix
+		cases = append(cases, emptyCase)
+
+		emptyCase.name = "empty object without trace id is unchanged/" + ending.name
+		emptyCase.fields = nil
+		emptyCase.contextTraceID = ""
+		emptyCase.wantKeys = nil
+		emptyCase.wantTraceID = nil
+		emptyCase.wantLine = "{}" + ending.suffix
+		cases = append(cases, emptyCase)
+	}
+
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			enc := NewTraceFirstEncoder(testJSONEncoder())
+			base := testJSONEncoder()
+			if tc.encoderConfig != nil {
+				base = zapcore.NewJSONEncoder(*tc.encoderConfig)
+			}
+			enc := NewTraceFirstEncoder(base)
+			if tc.contextTraceID != "" {
+				enc.AddString(TraceIDLogKey, tc.contextTraceID)
+			}
 			buf, err := enc.EncodeEntry(entry, tc.fields)
 			require.NoError(t, err)
 			line := buf.String()
@@ -136,6 +187,9 @@ func TestTraceFirstEncoderEncodeEntry(t *testing.T) {
 
 			assert.True(t, json.Valid([]byte(line)), "output must be valid JSON: %s", line)
 			assert.Equal(t, tc.wantKeys, topLevelKeys(t, line))
+			if tc.wantLine != "" {
+				assert.Equal(t, tc.wantLine, line, "output must preserve the original line ending")
+			}
 
 			var decoded map[string]any
 			require.NoError(t, json.Unmarshal([]byte(line), &decoded))

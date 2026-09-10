@@ -17,6 +17,7 @@ limitations under the License.
 package tracing
 
 import (
+	"bytes"
 	"encoding/json"
 
 	"go.uber.org/zap"
@@ -153,7 +154,12 @@ func (e *traceFirstEncoder) EncodeEntry(entry zapcore.Entry, fields []zapcore.Fi
 	spliced.AppendByte('{')
 	spliced.AppendString(`"` + TraceIDLogKey + `":`)
 	spliced.AppendBytes(quoted)
-	spliced.AppendByte(',')
+	// Empty objects may include a line ending. Add a comma only when the
+	// original object has fields, and preserve its unmodified suffix.
+	body := bytes.TrimSpace(encoded.Bytes()[1:])
+	if len(body) > 0 && body[0] != '}' {
+		spliced.AppendByte(',')
+	}
 	spliced.AppendBytes(encoded.Bytes()[1:])
 	encoded.Free()
 	return spliced, nil

@@ -160,13 +160,13 @@ func main() {
 	// the calling site, so that structured logs (which by default omit it) are as
 	// locatable as klog-native logs.
 	//
-	// The explicit Encoder fixes the format to one JSON object per line with the
-	// trace ID as its first field (see tracing.NewTraceFirstJSONEncoder). It
-	// takes precedence over --zap-encoder, which therefore no longer switches
-	// the format; other zap flags (level, stacktrace) keep working.
+	// The explicit Encoder fixes the format to one JSON object per line with
+	// the trace ID first and ISO8601 timestamps (see tracing.NewTraceFirstJSONEncoder).
+	// Both --zap-encoder and --zap-time-encoding are overridden and have no effect;
+	// --zap-log-level and --zap-stacktrace-level remain effective.
 	opts.Encoder = tracing.NewTraceFirstJSONEncoder()
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts), zap.RawZapOpts(gozap.AddCaller())))
-	setupLog.Info("controller logger initialized with trace-first JSON encoder; --zap-encoder is overridden and has no effect")
+	setupLog.Info("controller logger initialized with trace-first JSON encoder and ISO8601 timestamps; --zap-encoder and --zap-time-encoding are overridden and have no effect")
 
 	if metricLabelsAllowlist != "" {
 		keys := strings.Split(metricLabelsAllowlist, ",")
