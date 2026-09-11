@@ -129,6 +129,9 @@ spec:
                 description: |-
                   Patch defines the changes to apply to each selected sandbox's template.
                   The patch is applied as a Strategic Merge Patch on the sandbox's PodTemplateSpec.
+                  Patch mode is the legacy incremental mode: it keeps namespace-exclusive
+                  serialization and never joins the stamp protocol. Mutually exclusive
+                  with Template/TemplateRef.
                 x-kubernetes-preserve-unknown-fields: true
               paused:
                 description: Paused indicates whether the update operation is paused.
@@ -201,6 +204,31 @@ spec:
                     type: array
                     x-kubernetes-list-type: set
                 type: object
+              template:
+                description: |-
+                  Template describes the pods that will be created.
+                  Template is mutual exclusive with TemplateRef
+                x-kubernetes-preserve-unknown-fields: true
+              templateRef:
+                description: TemplateRef references a SandboxTemplate, which will
+                  be used to create the sandbox.
+                properties:
+                  apiVersion:
+                    description: |-
+                      name of the SandboxTemplate apiVersion
+                      Default to v1
+                    type: string
+                  kind:
+                    description: |-
+                      name of the SandboxTemplate kind
+                      Default to PodTemplate
+                    type: string
+                  name:
+                    description: name of the SandboxTemplate
+                    type: string
+                required:
+                - name
+                type: object
               updateStrategy:
                 description: UpdateStrategy defines the strategy for the batch update.
                 properties:
@@ -222,6 +250,10 @@ spec:
                     - CheckpointRestore
                     type: string
                 type: object
+              volumeClaimTemplates:
+                description: VolumeClaimTemplates is a list of PVC templates to create
+                  for this Sandbox.
+                x-kubernetes-preserve-unknown-fields: true
             required:
             - selector
             type: object
@@ -305,14 +337,30 @@ spec:
                   update.
                 format: int32
                 type: integer
+              supersededReplicas:
+                description: |-
+                  SupersededReplicas is the number of sandboxes carrying a stamp newer
+                  than this ops; they are settled as superseded and never re-updated.
+                  Template mode only.
+                format: int32
+                type: integer
               updatedReplicas:
-                description: UpdatedReplicas is the number of sandboxes that have
-                  been successfully updated.
+                description: |-
+                  UpdatedReplicas is the number of sandboxes that have been successfully updated.
+                  For template mode this means the sandbox carries this ops' stamp
+                  (delivered by a round or by the no-op fast path). It records delivery
+                  history: a newer ops may later bring the sandbox to a newer template.
                 format: int32
                 type: integer
               updatingReplicas:
                 description: UpdatingReplicas is the number of sandboxes currently
                   being updated.
+                format: int32
+                type: integer
+              waitingReplicas:
+                description: |-
+                  WaitingReplicas is the number of sandboxes occupied by another ops'
+                  in-flight round; this ops waits for the round's terminal state.
                 format: int32
                 type: integer
             required:

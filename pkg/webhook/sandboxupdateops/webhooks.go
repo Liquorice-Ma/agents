@@ -20,12 +20,19 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
+	"github.com/openkruise/agents/pkg/webhook/sandboxupdateops/mutating"
 	"github.com/openkruise/agents/pkg/webhook/sandboxupdateops/validating"
 	"github.com/openkruise/agents/pkg/webhook/types"
 )
 
 func GetHandlerGetters() []types.HandlerGetter {
 	return []types.HandlerGetter{
+		func(mgr manager.Manager) types.Handler {
+			return &mutating.Defaulter{
+				Client:  mgr.GetClient(),
+				Decoder: admission.NewDecoder(mgr.GetScheme()),
+			}
+		},
 		func(mgr manager.Manager) types.Handler {
 			return &validating.SandboxUpdateOpsValidatingHandler{
 				Client:  mgr.GetClient(),

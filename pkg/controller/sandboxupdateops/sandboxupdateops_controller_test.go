@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -1873,7 +1874,9 @@ func TestReconcile_ConcurrentOpsInNamespace(t *testing.T) {
 		NamespacedName: types.NamespacedName{Name: "ops-pending", Namespace: "default"},
 	})
 	assert.NoError(t, err)
-	assert.Equal(t, ctrl.Result{}, result)
+	// A blocked ops polls: no event routes to it when the blocking ops
+	// finishes or is deleted.
+	assert.Equal(t, ctrl.Result{RequeueAfter: templateModePollInterval}, result)
 
 	// Verify ops-pending was NOT transitioned (still Pending, no status update)
 	updatedOps := &agentsv1alpha1.SandboxUpdateOps{}
@@ -2528,9 +2531,10 @@ func TestReconcile_Phase2PatchForResumeSucceed(t *testing.T) {
 		"resumeSucceed sandbox should count as updating")
 }
 
-func TestReconcile_Phase2PatchPausedOpsSkipsPhase2(t *testing.T) {
-	// When ops.Spec.Paused is true, phase 2 patch should NOT be executed
-	// even if there are resumeSucceed candidates.
+func TestReconcile_Phase2PatchPausedOpsStillRunsPhase2(t *testing.T) {
+	// spec.paused only brakes starting new rounds; a two-phase flow already
+	// in flight (resumeSucceed candidate) must be finished even while paused,
+	// otherwise the sandbox would stay resumed with the old template.
 	ops := newSandboxUpdateOps("test-ops", "default", agentsv1alpha1.SandboxUpdateOpsUpdating, true, nil)
 	ops.Finalizers = []string{finalizerName}
 	ops.Spec.Patch = mustMarshalPatch(corev1.PodTemplateSpec{
@@ -2553,14 +2557,14 @@ func TestReconcile_Phase2PatchPausedOpsSkipsPhase2(t *testing.T) {
 	})
 	assert.NoError(t, err)
 
-	// Verify phase 2 patch was NOT applied (ops is paused)
+	// Verify phase 2 patch was applied even though the ops is paused
 	updatedSbx := &agentsv1alpha1.Sandbox{}
 	err = r.Get(context.Background(), types.NamespacedName{Name: "sbx-1", Namespace: "default"}, updatedSbx)
 	assert.NoError(t, err)
-	assert.Equal(t, "busybox:1.0", updatedSbx.Spec.Template.Spec.Containers[0].Image,
-		"template should NOT be patched when ops is paused")
+	assert.Equal(t, "busybox:2.0", updatedSbx.Spec.Template.Spec.Containers[0].Image,
+		"template should be patched to finish the in-flight two-phase flow even when ops is paused")
 	_, exists := updatedSbx.Annotations[agentsv1alpha1.AnnotationUpgradeResumeTrigger]
-	assert.True(t, exists, "resume trigger annotation should remain when ops is paused")
+	assert.False(t, exists, "resume trigger annotation should be removed once phase 2 completes")
 }
 
 func TestIsStateIncluded_DefaultExcludesPaused(t *testing.T) {
@@ -2755,4 +2759,130 @@ func TestReconcile_LabeledSandboxInIntermediatePhaseStaysTracked(t *testing.T) {
 			assert.Equal(t, tt.expectedUpdating, updatedOps.Status.UpdatingReplicas)
 		})
 	}
+}
+
+func TestReconcilePatchMode_ForeignPendingWaitsAndPolls(t *testing.T) {
+	ops := newSandboxUpdateOps("test-ops", "default", "", false, nil)
+	ops.Spec.Patch = mustMarshalPatch(corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{Name: "main", Image: "busybox:2.0"},
+			},
+		},
+	})
+	// A template-mode revision (or another patch ops' "patch/" record) left
+	// in flight — e.g. its ops was deleted mid-round — occupies the sandbox.
+	sbx := newSandbox("sbx-1", "default", "", agentsv1alpha1.SandboxRunning, nil)
+	sbx.Annotations = map[string]string{
+		agentsv1alpha1.AnnotationUpdateOpsPendingRevision: "2027-01-01T00:00:00Z/other-ops",
+	}
+	r := newTestReconciler(ops, sbx)
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-ops", Namespace: "default"},
+	})
+	assert.NoError(t, err)
+	// The occupied sandbox's wake-up events never route to this ops, so it
+	// polls to re-read occupancy.
+	assert.Equal(t, templateModePollInterval, result.RequeueAfter)
+
+	updatedOps := &agentsv1alpha1.SandboxUpdateOps{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: "test-ops", Namespace: "default"}, updatedOps))
+	assert.Equal(t, agentsv1alpha1.SandboxUpdateOpsUpdating, updatedOps.Status.Phase)
+	assert.Equal(t, int32(1), updatedOps.Status.Replicas)
+	assert.Equal(t, int32(1), updatedOps.Status.WaitingReplicas)
+
+	// The occupied sandbox is never re-targeted.
+	updatedSbx := &agentsv1alpha1.Sandbox{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: "sbx-1", Namespace: "default"}, updatedSbx))
+	assert.Equal(t, "busybox:1.0", updatedSbx.Spec.Template.Spec.Containers[0].Image)
+	assert.Empty(t, updatedSbx.Labels[agentsv1alpha1.LabelSandboxUpdateOps])
+}
+
+func TestHandleDeletion_FinishesTwoPhaseFlowFirst(t *testing.T) {
+	ops := newTemplateOps("test-ops", "default", agentsv1alpha1.SandboxUpdateOpsUpdating)
+	ops.Finalizers = []string{finalizerName}
+
+	// Phase 1 landed: the sandbox carries this ops' pending record and the
+	// resume trigger, waiting for phase 2.
+	sbx := newSandbox("sbx-1", "default", "test-ops", agentsv1alpha1.SandboxRunning, []metav1.Condition{{
+		Type:   string(agentsv1alpha1.SandboxConditionUpgrading),
+		Status: metav1.ConditionTrue,
+		Reason: agentsv1alpha1.SandboxUpgradingReasonResumeSucceed,
+	}})
+	sbx.Annotations = map[string]string{
+		agentsv1alpha1.AnnotationUpdateOpsPendingRevision: opsRevision(ops),
+		agentsv1alpha1.AnnotationUpgradeResumeTrigger:     agentsv1alpha1.True,
+	}
+
+	r := newTestReconciler(ops, sbx)
+	require.NoError(t, r.Delete(context.Background(), ops))
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-ops", Namespace: "default"},
+	})
+	require.NoError(t, err)
+
+	// Phase 2 was driven before the finalizer was released: the target
+	// template is written and the resume trigger is gone, so the round can
+	// settle on the sandbox side without the ops.
+	updatedSbx := &agentsv1alpha1.Sandbox{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: "sbx-1", Namespace: "default"}, updatedSbx))
+	assert.Equal(t, "busybox:2.0", updatedSbx.Spec.Template.Spec.Containers[0].Image)
+	assert.Empty(t, updatedSbx.Annotations[agentsv1alpha1.AnnotationUpgradeResumeTrigger])
+	assert.Empty(t, updatedSbx.Labels[agentsv1alpha1.LabelSandboxUpdateOps])
+	// The pending record survives: the sandbox-side terminal handling owns it.
+	assert.Equal(t, opsRevision(ops), updatedSbx.Annotations[agentsv1alpha1.AnnotationUpdateOpsPendingRevision])
+
+	updatedOps := &agentsv1alpha1.SandboxUpdateOps{}
+	err = r.Get(context.Background(), types.NamespacedName{Name: "test-ops", Namespace: "default"}, updatedOps)
+	assert.True(t, errors.IsNotFound(err), "ops should be fully deleted after finalizer removal")
+}
+
+func TestHandleDeletion_TwoPhaseFlowFailureKeepsFinalizer(t *testing.T) {
+	ops := newTemplateOps("test-ops", "default", agentsv1alpha1.SandboxUpdateOpsUpdating)
+	ops.Finalizers = []string{finalizerName}
+
+	sbx := newSandbox("sbx-1", "default", "test-ops", agentsv1alpha1.SandboxRunning, []metav1.Condition{{
+		Type:   string(agentsv1alpha1.SandboxConditionUpgrading),
+		Status: metav1.ConditionTrue,
+		Reason: agentsv1alpha1.SandboxUpgradingReasonResumeSucceed,
+	}})
+	sbx.Annotations = map[string]string{
+		agentsv1alpha1.AnnotationUpdateOpsPendingRevision: opsRevision(ops),
+		agentsv1alpha1.AnnotationUpgradeResumeTrigger:     agentsv1alpha1.True,
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(testScheme).
+		WithStatusSubresource(&agentsv1alpha1.SandboxUpdateOps{}, &agentsv1alpha1.Sandbox{}).
+		WithRuntimeObjects(ops, sbx).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if _, ok := obj.(*agentsv1alpha1.Sandbox); ok {
+					return fmt.Errorf("simulated phase-2 patch error")
+				}
+				return c.Patch(ctx, obj, patch, opts...)
+			},
+		}).
+		Build()
+	r := &Reconciler{Client: fakeClient, Scheme: testScheme, Recorder: record.NewFakeRecorder(100)}
+
+	require.NoError(t, r.Delete(context.Background(), ops))
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-ops", Namespace: "default"},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "simulated phase-2 patch error")
+
+	// The finalizer stays so the deletion is retried: the sandbox must not
+	// be stranded between phase 1 and phase 2.
+	updatedOps := &agentsv1alpha1.SandboxUpdateOps{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: "test-ops", Namespace: "default"}, updatedOps))
+	assert.Contains(t, updatedOps.Finalizers, finalizerName)
+
+	updatedSbx := &agentsv1alpha1.Sandbox{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: "sbx-1", Namespace: "default"}, updatedSbx))
+	assert.Equal(t, agentsv1alpha1.True, updatedSbx.Annotations[agentsv1alpha1.AnnotationUpgradeResumeTrigger])
+	assert.Equal(t, "test-ops", updatedSbx.Labels[agentsv1alpha1.LabelSandboxUpdateOps])
 }

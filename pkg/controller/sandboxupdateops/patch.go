@@ -117,11 +117,15 @@ func mergeTemplate(modified *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.Sandbox
 	return nil
 }
 
-// patchAndExpect computes a merge patch from sbx to modified, applies it,
-// logs the operation, and records a resource-version expectation. The tag
-// is appended to log messages to distinguish phase 2 from normal upgrades.
+// patchAndExpect computes a merge patch from sbx to modified, applies it
+// with optimistic locking, logs the operation, and records a resource-version
+// expectation. The optimistic lock makes every round-start and stamp write
+// conditional on the read revision, so a concurrent write (another ops, the
+// sandbox controller's terminal handling) surfaces as a conflict and the next
+// reconcile re-evaluates from fresh state. The tag is appended to log
+// messages to distinguish phase 2 from normal upgrades.
 func (r *Reconciler) patchAndExpect(ctx context.Context, sbx, modified *agentsv1alpha1.Sandbox, tag string) error {
-	patch := client.MergeFrom(sbx)
+	patch := client.MergeFromWithOptions(sbx, client.MergeFromWithOptimisticLock{})
 	patchData, patchErr := patch.Data(modified)
 	if patchErr != nil {
 		klog.ErrorS(patchErr, "Failed to compute patch data"+tag, "sandbox", klog.KObj(sbx))
@@ -163,14 +167,20 @@ func (r *Reconciler) applySandboxPatch(ctx context.Context, sbx *agentsv1alpha1.
 	modified.Labels[agentsv1alpha1.LabelSandboxUpdateOps] = ops.Name
 	delete(modified.Labels, agentsv1alpha1.LabelSandboxUpgradeFailed)
 
+	// Record the in-flight round: the pending record is the occupancy signal
+	// read by other ops. Patch mode prefixes it with "patch/" — patch rounds
+	// never join the stamp protocol, so the sandbox-side terminal handling
+	// clears such a record without promoting it to a stamp.
+	if modified.Annotations == nil {
+		modified.Annotations = map[string]string{}
+	}
+	modified.Annotations[agentsv1alpha1.AnnotationUpdateOpsPendingRevision] = agentsv1alpha1.UpdateOpsPatchPendingPrefix + opsRevision(ops)
+
 	// For paused sandboxes, use two-phase upgrade:
 	// Phase 1: set the resume trigger annotation without patching the template.
 	// The sandbox controller resumes with the OLD template, then transitions
 	// to ResumeSucceed. SandboxUpdateOps patches the template in phase 2.
 	if sbx.Status.Phase == agentsv1alpha1.SandboxPaused {
-		if modified.Annotations == nil {
-			modified.Annotations = map[string]string{}
-		}
 		modified.Annotations[agentsv1alpha1.AnnotationUpgradeResumeTrigger] = agentsv1alpha1.True
 		return r.patchAndExpect(ctx, sbx, modified, " (resume trigger)")
 	}

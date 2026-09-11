@@ -348,6 +348,15 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 		return ctrl.Result{}, nil
 	}
 
+	// Settle a terminal SandboxUpdateOps round (promotion / failure release /
+	// orphan cleanup) based on the persisted status, independent of whether
+	// the initiating ops still exists.
+	if patched, roundErr := r.ensureUpdateOpsRoundTerminal(ctx, box); roundErr != nil {
+		return reconcile.Result{}, roundErr
+	} else if patched {
+		return reconcile.Result{}, nil
+	}
+
 	// add hash annotation for in-place update detection
 	if box, err = r.addSandboxHashAnnotation(ctx, box); err != nil {
 		return reconcile.Result{}, err

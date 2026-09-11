@@ -105,6 +105,38 @@ const (
 // pod replacement.
 const AnnotationUpgradeResumeTrigger = InternalPrefix + "upgrade-resume-trigger"
 
+// SandboxUpdateOps stamp protocol annotations. Both values use the format
+// "<creationTimestamp RFC3339 UTC>/<ops name>", so a plain string comparison
+// yields the (creationTimestamp, name) total order used by the protocol.
+const (
+	// AnnotationUpdateOpsPendingRevision is the pending record of the stamp
+	// protocol: written atomically with the round-start patch by a
+	// SandboxUpdateOps (phase 1 for paused sandboxes). It signals that a
+	// round is in flight (occupancy) and is the promotion source for the
+	// stamp — never a comparison input. Its terminal lifecycle is owned by
+	// the sandbox controller's round-completion handling, independent of
+	// the SandboxUpdateOps object: promoted to the stamp on upgrade
+	// success, cleared with no stamp written on terminal failure.
+	AnnotationUpdateOpsPendingRevision = InternalPrefix + "update-ops-pending-revision"
+
+	// AnnotationUpdateOpsRevision is the stamp of the stamp protocol: the
+	// durable record of the newest SandboxUpdateOps revision that landed on
+	// this sandbox. Written by the sandbox controller when a round succeeds
+	// (promotion from the pending record), or directly by a SandboxUpdateOps
+	// when the sandbox already carries its target template (no-op fast
+	// path). Never cleared; survives SandboxUpdateOps deletion. The sole
+	// input of the stamp protocol's update rules.
+	AnnotationUpdateOpsRevision = InternalPrefix + "update-ops-revision"
+
+	// UpdateOpsPatchPendingPrefix prefixes a pending record written by a
+	// patch-mode SandboxUpdateOps ("patch/<revision>"). Patch mode never
+	// joins the stamp protocol, so the sandbox-side promotion clears such a
+	// pending record and spec.upgradePolicy without writing a stamp. Any
+	// non-empty pending value — prefixed or not — still signals occupancy
+	// to every other ops.
+	UpdateOpsPatchPendingPrefix = "patch/"
+)
+
 // AnnotationPodProbe is the annotation key used by the PodProbeMarker Serverless
 // protocol. The sandbox controller writes probe definitions to this annotation
 // on the Pod, and the agent-runtime sidecar reads them, executes the probes,

@@ -92,6 +92,13 @@ func validOps() *v1alpha1.SandboxUpdateOps {
 			Selector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{"app": "test"},
 			},
+			// Exactly one update mode is required; use an image-free patch so
+			// the fixture stays valid for every strategy.
+			Patch: mustMarshalPatch(corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "main", Env: []corev1.EnvVar{{Name: "FOO", Value: "bar"}}}},
+				},
+			}),
 		},
 	}
 }
@@ -470,12 +477,16 @@ func TestCreate_CheckpointRestoreWithoutImageChange_Allowed(t *testing.T) {
 	require.True(t, resp.Allowed)
 }
 
-func TestCreate_CheckpointRestoreNoPatch_Allowed(t *testing.T) {
+func TestCreate_CheckpointRestoreTemplateMode_Allowed(t *testing.T) {
+	// The admission-time image check only applies to patch mode; a template
+	// mode ops carries a full template whose change set is a per-sandbox diff.
 	obj := validOps()
 	obj.Spec.UpdateStrategy.Type = v1alpha1.SandboxUpdateOpsStrategyCheckpointRestore
+	obj.Spec.Patch = runtime.RawExtension{}
+	obj.Spec.TemplateRef = &v1alpha1.SandboxTemplateRef{Name: "test-template"}
 	h := newTestHandler()
 	resp := h.Handle(context.TODO(), makeCreateRequest(t, obj))
-	require.True(t, resp.Allowed)
+	require.True(t, resp.Allowed, "expected allowed, got: %s", resp.Result)
 }
 
 func TestCreate_RecreateWithImageChange_Allowed(t *testing.T) {
@@ -489,4 +500,162 @@ func TestCreate_RecreateWithImageChange_Allowed(t *testing.T) {
 	h := newTestHandler()
 	resp := h.Handle(context.TODO(), makeCreateRequest(t, obj))
 	require.True(t, resp.Allowed)
+}
+
+// validTemplateOps returns a template-mode ops whose inline template is fully
+// specified, so it passes the self-contained pod template validation.
+func validTemplateOps() *v1alpha1.SandboxUpdateOps {
+	obj := validOps()
+	obj.Spec.Patch = runtime.RawExtension{}
+	obj.Spec.Template = &corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			RestartPolicy:                 corev1.RestartPolicyAlways,
+			DNSPolicy:                     corev1.DNSClusterFirst,
+			TerminationGracePeriodSeconds: new(int64),
+			Containers: []corev1.Container{
+				{
+					Name:                     "main",
+					Image:                    "nginx:latest",
+					ImagePullPolicy:          corev1.PullAlways,
+					TerminationMessagePolicy: corev1.TerminationMessageReadFile,
+				},
+			},
+		},
+	}
+	return obj
+}
+
+func activeOps(name string, templateMode bool) *v1alpha1.SandboxUpdateOps {
+	ops := &v1alpha1.SandboxUpdateOps{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: "default",
+		},
+		Spec: v1alpha1.SandboxUpdateOpsSpec{
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"app": "old"},
+			},
+		},
+		Status: v1alpha1.SandboxUpdateOpsStatus{
+			Phase: v1alpha1.SandboxUpdateOpsUpdating,
+		},
+	}
+	if templateMode {
+		ops.Spec.TemplateRef = &v1alpha1.SandboxTemplateRef{Name: "old-template"}
+	}
+	return ops
+}
+
+func TestCreate_TemplateMode_Allowed(t *testing.T) {
+	h := newTestHandler()
+	resp := h.Handle(context.TODO(), makeCreateRequest(t, validTemplateOps()))
+	require.True(t, resp.Allowed, "expected allowed, got: %s", resp.Result)
+}
+
+func TestCreate_BothModes_Rejected(t *testing.T) {
+	obj := validTemplateOps()
+	obj.Spec.Patch = validOps().Spec.Patch
+	h := newTestHandler()
+	resp := h.Handle(context.TODO(), makeCreateRequest(t, obj))
+	require.False(t, resp.Allowed)
+	require.Contains(t, resp.Result.Message, "mutually exclusive")
+}
+
+func TestCreate_NoMode_Rejected(t *testing.T) {
+	obj := validOps()
+	obj.Spec.Patch = runtime.RawExtension{}
+	h := newTestHandler()
+	resp := h.Handle(context.TODO(), makeCreateRequest(t, obj))
+	require.False(t, resp.Allowed)
+	require.Contains(t, resp.Result.Message, "exactly one update mode")
+}
+
+func TestCreate_TemplateAndTemplateRef_Rejected(t *testing.T) {
+	obj := validTemplateOps()
+	obj.Spec.TemplateRef = &v1alpha1.SandboxTemplateRef{Name: "tpl-a"}
+	h := newTestHandler()
+	resp := h.Handle(context.TODO(), makeCreateRequest(t, obj))
+	require.False(t, resp.Allowed)
+	require.Contains(t, resp.Result.Message, "templateRef and template is mutual exclusive")
+}
+
+func TestCreate_VolumeClaimTemplates_Rejected(t *testing.T) {
+	obj := validTemplateOps()
+	obj.Spec.VolumeClaimTemplates = []corev1.PersistentVolumeClaim{
+		{ObjectMeta: metav1.ObjectMeta{Name: "data"}},
+	}
+	h := newTestHandler()
+	resp := h.Handle(context.TODO(), makeCreateRequest(t, obj))
+	require.False(t, resp.Allowed)
+	require.Contains(t, resp.Result.Message, "volumeClaimTemplates is not supported")
+}
+
+func TestCreate_TemplateNotSelfContained_Rejected(t *testing.T) {
+	// Template mode is a full overwrite, so an incomplete snapshot (no
+	// containers) must be rejected, unlike a patch increment.
+	obj := validTemplateOps()
+	obj.Spec.Template = &corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{},
+		},
+	}
+	h := newTestHandler()
+	resp := h.Handle(context.TODO(), makeCreateRequest(t, obj))
+	require.False(t, resp.Allowed)
+	require.Contains(t, resp.Result.Message, "template")
+}
+
+func TestCreate_TemplateWithActiveTemplateOps_Allowed(t *testing.T) {
+	// Template-mode ops coordinate per sandbox via the stamp protocol and may
+	// run concurrently.
+	h := newTestHandler(activeOps("existing-template-ops", true))
+	resp := h.Handle(context.TODO(), makeCreateRequest(t, validTemplateOps()))
+	require.True(t, resp.Allowed, "expected allowed, got: %s", resp.Result)
+}
+
+func TestCreate_TemplateWithActivePatchOps_Rejected(t *testing.T) {
+	h := newTestHandler(activeOps("existing-patch-ops", false))
+	resp := h.Handle(context.TODO(), makeCreateRequest(t, validTemplateOps()))
+	require.False(t, resp.Allowed)
+	require.Contains(t, resp.Result.Message, "active SandboxUpdateOps")
+}
+
+func TestCreate_PatchWithActiveTemplateOps_Rejected(t *testing.T) {
+	h := newTestHandler(activeOps("existing-template-ops", true))
+	resp := h.Handle(context.TODO(), makeCreateRequest(t, validOps()))
+	require.False(t, resp.Allowed)
+	require.Contains(t, resp.Result.Message, "active SandboxUpdateOps")
+}
+
+func TestUpdate_ChangeTemplate_Rejected(t *testing.T) {
+	oldObj := validTemplateOps()
+	newObj := oldObj.DeepCopy()
+	newObj.Spec.Template.Spec.Containers[0].Image = "nginx:1.29"
+	h := newTestHandler()
+	resp := h.Handle(context.TODO(), makeUpdateRequest(t, oldObj, newObj))
+	require.False(t, resp.Allowed)
+	require.Contains(t, resp.Result.Message, "template and templateRef are immutable")
+}
+
+func TestUpdate_ChangeStrategyType_Rejected(t *testing.T) {
+	oldObj := validOps()
+	oldObj.Spec.UpdateStrategy.Type = v1alpha1.SandboxUpdateOpsStrategyRecreate
+	newObj := oldObj.DeepCopy()
+	newObj.Spec.UpdateStrategy.Type = v1alpha1.SandboxUpdateOpsStrategyCheckpointRestore
+	h := newTestHandler()
+	resp := h.Handle(context.TODO(), makeUpdateRequest(t, oldObj, newObj))
+	require.False(t, resp.Allowed)
+	require.Contains(t, resp.Result.Message, "updateStrategy.type is immutable")
+}
+
+func TestUpdate_ChangeStateFilter_Rejected(t *testing.T) {
+	oldObj := validOps()
+	newObj := oldObj.DeepCopy()
+	newObj.Spec.StateFilter = &v1alpha1.UpgradeStateFilter{
+		States: []v1alpha1.SandboxPhase{v1alpha1.SandboxPaused},
+	}
+	h := newTestHandler()
+	resp := h.Handle(context.TODO(), makeUpdateRequest(t, oldObj, newObj))
+	require.False(t, resp.Allowed)
+	require.Contains(t, resp.Result.Message, "stateFilter is immutable")
 }

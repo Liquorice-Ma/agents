@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"time"
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -49,14 +50,22 @@ var (
 	concurrentReconciles        = 1
 	controllerKind              = agentsv1alpha1.GroupVersion.WithKind("SandboxUpdateOps")
 	ResourceVersionExpectations = expectations.NewResourceVersionExpectation()
+
+	// templateModePollInterval is the polling requeue delay for template-mode
+	// ops with waiting sandboxes and for ops blocked by the mixed-mode
+	// barrier: their wake-up events route to other ops (or to nobody), so
+	// polling is the wake-up mechanism.
+	templateModePollInterval = 30 * time.Second
 )
 
 const (
 	eventReasonSandboxUpdateOpsPhaseChanged = "SandboxUpdateOpsPhaseChanged"
+	eventReasonBlocked                      = "Blocked"
 )
 
 func init() {
 	flag.IntVar(&concurrentReconciles, "sandboxupdateops-workers", concurrentReconciles, "Max concurrent workers for SandboxUpdateOps controller.")
+	flag.DurationVar(&templateModePollInterval, "sandboxupdateops-poll-interval", templateModePollInterval, "Polling requeue interval for SandboxUpdateOps waiting on sandboxes occupied by another ops.")
 }
 
 // Reconciler reconciles a SandboxUpdateOps object
@@ -107,24 +116,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// 2. Check if another SandboxUpdateOps in the same namespace is already Updating
-	// TODO: This is a short-term solution to prevent concurrent ops in the same namespace.
-	//  A more robust approach would be using a webhook to reject creation when an active ops exists,
-	//  or implementing a queue/priority-based scheduling mechanism.
-	opsList := &agentsv1alpha1.SandboxUpdateOpsList{}
-	if err := r.List(ctx, opsList, client.InNamespace(ops.Namespace), client.UnsafeDisableDeepCopy); err != nil {
-		return ctrl.Result{}, err
-	}
-	for i := range opsList.Items {
-		other := &opsList.Items[i]
-		if other.Name != ops.Name && other.Status.Phase == agentsv1alpha1.SandboxUpdateOpsUpdating {
-			klog.InfoS("Another SandboxUpdateOps is already updating, skipping this one",
-				"current", klog.KObj(ops), "active", klog.KObj(other))
-			return ctrl.Result{}, nil
-		}
-	}
-
-	// 3. Handle deletion: clean up sandbox labels
+	// 2. Handle deletion first: clean up sandbox labels. Deletion must run
+	// before the concurrency barrier so the escape hatch cannot jam — a
+	// blocked ops must still be deletable while another ops is active.
 	if !ops.DeletionTimestamp.IsZero() {
 		return r.handleDeletion(ctx, ops)
 	}
@@ -143,13 +137,26 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, nil
 	}
 
-	// 3. Convert selector to labels.Selector
+	// 5. Mixed-mode concurrency barrier: defensive re-check of the admission
+	// rule (the webhook reads an informer-backed cache, so two near-
+	// simultaneous creations can both slip past it). Template-mode ops may
+	// run concurrently with each other; any combination involving patch mode
+	// is a conflict, resolved deterministically by the same
+	// (creationTimestamp, name) total order the stamps use: the newer ops
+	// backs off, the older proceeds.
+	if blocked, err := r.blockedByModeBarrier(ctx, ops); err != nil {
+		return ctrl.Result{}, err
+	} else if blocked {
+		return ctrl.Result{RequeueAfter: templateModePollInterval}, nil
+	}
+
+	// 6. Convert selector to labels.Selector
 	selector, err := metav1.LabelSelectorAsSelector(ops.Spec.Selector)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
-	// 4. List matching sandboxes in the same namespace (exclude sandboxes controlled by SandboxSet)
+	// 7. List matching sandboxes in the same namespace (exclude sandboxes controlled by SandboxSet)
 	sandboxList := &agentsv1alpha1.SandboxList{}
 	if err := r.List(ctx, sandboxList,
 		client.InNamespace(ops.Namespace),
@@ -158,26 +165,33 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 
-	// 5. Classify sandbox states
-	updated, failed, updating, candidates, resumeSucceedCandidates, requeueResult := r.classifySandboxes(ctx, sandboxList, ops)
+	// 8. Template mode joins the stamp-based last-writer-wins protocol; patch
+	// mode keeps the legacy namespace-exclusive flow below.
+	if ops.Spec.IsTemplateMode() {
+		return r.reconcileTemplateMode(ctx, ops, sandboxList)
+	}
+
+	// 9. Classify sandbox states
+	updated, failed, updating, waiting, candidates, resumeSucceedCandidates, requeueResult := r.classifySandboxes(ctx, sandboxList, ops)
 	if requeueResult != nil {
 		return *requeueResult, nil
 	}
 
-	total := updated + failed + updating + int32(len(candidates)) // #nosec G115 -- K8s object count
+	total := updated + failed + updating + waiting + int32(len(candidates)) // #nosec G115 -- K8s object count
 	newStatus := ops.Status.DeepCopy()
 	newStatus.ObservedGeneration = ops.Generation
 	newStatus.Replicas = total
 	newStatus.UpdatedReplicas = updated
 	newStatus.FailedReplicas = failed
 	newStatus.UpdatingReplicas = updating
+	newStatus.WaitingReplicas = waiting
 
 	// sort candidates by name for deterministic upgrade order
 	sort.Slice(candidates, func(i, j int) bool {
 		return candidates[i].Name < candidates[j].Name
 	})
 
-	// 6. Phase state machine
+	// 10. Phase state machine
 	switch {
 	case ops.Status.Phase == "" || ops.Status.Phase == agentsv1alpha1.SandboxUpdateOpsPending:
 		newStatus.Phase = agentsv1alpha1.SandboxUpdateOpsUpdating
@@ -193,8 +207,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// Process phase 2: patch template for ResumeSucceed sandboxes (no concurrency
 	// limit). These sandboxes already resumed with the OLD template and just need
 	// the template patch + annotation removal to proceed with the actual upgrade.
+	// spec.paused only brakes starting new rounds; a two-phase flow already in
+	// flight must always be finished, otherwise the sandbox would stay resumed
+	// with the old template indefinitely.
 	var patchErr error
-	if newStatus.Phase == agentsv1alpha1.SandboxUpdateOpsUpdating && !ops.Spec.Paused {
+	if newStatus.Phase == agentsv1alpha1.SandboxUpdateOpsUpdating {
 		patchErr = r.patchResumeSucceedSandboxes(ctx, resumeSucceedCandidates, ops)
 	}
 
@@ -223,12 +240,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 	}
 
-	// 7. Update status first, then return patch error for requeue
+	// 11. Update status first, then return patch error for requeue
 	if err := r.updateStatus(ctx, ops, newStatus); err != nil {
 		return ctrl.Result{}, err
 	}
 	if patchErr != nil {
 		return ctrl.Result{}, patchErr
+	}
+	// Waiting sandboxes are occupied by another ops' in-flight round; that
+	// round's wake-up events route to the ops named by the sandbox label,
+	// never to this one, so poll to re-read occupancy.
+	if waiting > 0 {
+		return ctrl.Result{RequeueAfter: templateModePollInterval}, nil
 	}
 	return ctrl.Result{}, nil
 }
@@ -281,7 +304,7 @@ func isStateIncluded(ops *agentsv1alpha1.SandboxUpdateOps, phase agentsv1alpha1.
 	return false
 }
 
-func (r *Reconciler) classifySandboxes(ctx context.Context, sandboxList *agentsv1alpha1.SandboxList, ops *agentsv1alpha1.SandboxUpdateOps) (updated, failed, updating int32, candidates, resumeSucceedCandidates []*agentsv1alpha1.Sandbox, requeueResult *ctrl.Result) {
+func (r *Reconciler) classifySandboxes(ctx context.Context, sandboxList *agentsv1alpha1.SandboxList, ops *agentsv1alpha1.SandboxUpdateOps) (updated, failed, updating, waiting int32, candidates, resumeSucceedCandidates []*agentsv1alpha1.Sandbox, requeueResult *ctrl.Result) {
 	for i := range sandboxList.Items {
 		sbx := &sandboxList.Items[i]
 		if !sbx.DeletionTimestamp.IsZero() {
@@ -334,6 +357,8 @@ func (r *Reconciler) classifySandboxes(ctx context.Context, sandboxList *agentsv
 		case sandboxUpdating:
 			r.syncSandboxUpgradeState(ctx, sbx, ops, sandboxUpdating)
 			updating++
+		case sandboxWaiting:
+			waiting++
 		case sandboxNoNeedUpdate:
 			continue
 		case sandboxCandidate:
@@ -357,6 +382,9 @@ const (
 	sandboxFailed                                  // upgrade failed
 	sandboxNoNeedUpdate                            // template already matches patch, skip entirely
 	sandboxResumeSucceed                           // resume succeeded, ready for template patch (phase 2)
+	sandboxWaiting                                 // occupied by another ops' in-flight round
+	sandboxSuperseded                              // template mode: carries a newer stamp, settled
+	sandboxFastPath                                // template mode: template already matches, stamp directly
 )
 
 func (s sandboxUpdateState) String() string {
@@ -373,12 +401,29 @@ func (s sandboxUpdateState) String() string {
 		return "NoNeedUpdate"
 	case sandboxResumeSucceed:
 		return "ResumeSucceed"
+	case sandboxWaiting:
+		return "Waiting"
+	case sandboxSuperseded:
+		return "Superseded"
+	case sandboxFastPath:
+		return "FastPath"
 	default:
 		return "Unknown"
 	}
 }
 
 func (r *Reconciler) classifySandbox(ctx context.Context, sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps) sandboxUpdateState {
+	// A non-empty pending record written by another ops — a template-mode
+	// revision or another patch-mode "patch/<revision>" — means a round is
+	// in flight on this sandbox. Never re-target it: wait for the
+	// sandbox-side terminal handling to settle that round, then re-evaluate.
+	// This also covers the gap where a deleted ops left a round in flight
+	// and this newer ops would otherwise overwrite it blindly.
+	myPending := agentsv1alpha1.UpdateOpsPatchPendingPrefix + opsRevision(ops)
+	if pending := sbx.Annotations[agentsv1alpha1.AnnotationUpdateOpsPendingRevision]; pending != "" && pending != myPending {
+		return sandboxWaiting
+	}
+
 	otherOpsName := sbx.Labels[agentsv1alpha1.LabelSandboxUpdateOps]
 	// If the sandbox has a label from another ops, check whether that ops
 	// is still active. An active ops (Pending/Updating) owns the sandbox.
@@ -578,6 +623,30 @@ func (r *Reconciler) handleDeletion(ctx context.Context, ops *agentsv1alpha1.San
 		if sbx.Labels[agentsv1alpha1.LabelSandboxUpdateOps] != ops.Name {
 			continue
 		}
+		// Finish an in-flight two-phase flow first: the sandbox carries this
+		// ops' resume trigger and pending record, i.e. phase 1 landed and the
+		// sandbox resumed (or is resuming) with the OLD template, waiting for
+		// phase 2. Deleting the ops must not strand it there — drive phase 2
+		// (target template write + trigger removal) now; afterwards the
+		// sandbox-side round-terminal handling settles the round on its own.
+		if sbx.Annotations[agentsv1alpha1.AnnotationUpgradeResumeTrigger] == agentsv1alpha1.True &&
+			isOwnPendingRecord(sbx, ops) {
+			var err error
+			if ops.Spec.IsTemplateMode() {
+				err = r.applyTemplatePhase2(ctx, sbx, ops)
+			} else {
+				err = r.applyTemplatePatch(ctx, sbx, ops)
+			}
+			if err != nil {
+				klog.ErrorS(err, "Failed to finish two-phase flow before deletion",
+					"sandbox", klog.KObj(sbx), "ops", klog.KObj(ops))
+				r.Recorder.Eventf(ops, v1.EventTypeWarning, "PatchFailed",
+					"Failed to finish two-phase upgrade of sandbox %s before deletion: %v", sbx.Name, err)
+				return ctrl.Result{}, err
+			}
+			klog.InfoS("Finished two-phase flow (phase 2) before deletion",
+				"sandbox", klog.KObj(sbx), "ops", klog.KObj(ops))
+		}
 		specPatch := ""
 		// Fallback cleanup: also clear the upgrade policy of sandboxes whose
 		// upgrade already succeeded, in case the per-sandbox cleanup in the
@@ -609,6 +678,18 @@ func (r *Reconciler) handleDeletion(ctx context.Context, ops *agentsv1alpha1.San
 	klog.InfoS("Finalizer removed, SandboxUpdateOps can be deleted",
 		"ops", klog.KObj(ops))
 	return ctrl.Result{}, nil
+}
+
+// isOwnPendingRecord reports whether the sandbox's pending record belongs to
+// this ops, in either mode's encoding (template mode writes the bare
+// revision, patch mode prefixes it with "patch/").
+func isOwnPendingRecord(sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps) bool {
+	pending := sbx.Annotations[agentsv1alpha1.AnnotationUpdateOpsPendingRevision]
+	if pending == "" {
+		return false
+	}
+	rev := opsRevision(ops)
+	return pending == rev || pending == agentsv1alpha1.UpdateOpsPatchPendingPrefix+rev
 }
 
 func (r *Reconciler) updateStatus(ctx context.Context, ops *agentsv1alpha1.SandboxUpdateOps, newStatus *agentsv1alpha1.SandboxUpdateOpsStatus) error {

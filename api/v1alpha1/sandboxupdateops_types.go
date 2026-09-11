@@ -34,10 +34,22 @@ type SandboxUpdateOpsSpec struct {
 
 	// Patch defines the changes to apply to each selected sandbox's template.
 	// The patch is applied as a Strategic Merge Patch on the sandbox's PodTemplateSpec.
+	// Patch mode is the legacy incremental mode: it keeps namespace-exclusive
+	// serialization and never joins the stamp protocol. Mutually exclusive
+	// with Template/TemplateRef.
 	// +optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:Schemaless
 	Patch runtime.RawExtension `json:"patch,omitempty"`
+
+	// Template/TemplateRef carry the complete desired template snapshot
+	// (template mode). Template-mode ops participate in the stamp-based
+	// last-writer-wins protocol and may run concurrently with other
+	// template-mode ops in the same namespace. Omitted fields are removals,
+	// not "keep as is". Mutually exclusive with Patch; exactly one mode must
+	// be set. VolumeClaimTemplates is not supported by batch update and is
+	// rejected at admission.
+	EmbeddedSandboxTemplate `json:",inline"`
 
 	// Lifecycle defines pre/post upgrade hooks to set on each sandbox during upgrade.
 	// +optional
@@ -53,6 +65,13 @@ type SandboxUpdateOpsSpec struct {
 	// represent in-progress upgrades owned by this ops.
 	// +optional
 	StateFilter *UpgradeStateFilter `json:"stateFilter,omitempty"`
+}
+
+// IsTemplateMode reports whether the spec uses template mode (a full desired
+// template snapshot via Template or TemplateRef). Non-template-mode specs use
+// the legacy patch mode; the webhook enforces that exactly one mode is set.
+func (s *SandboxUpdateOpsSpec) IsTemplateMode() bool {
+	return s.Template != nil || s.TemplateRef != nil
 }
 
 // UpgradeStateFilter defines criteria for selecting sandboxes as upgrade
@@ -123,6 +142,9 @@ type SandboxUpdateOpsStatus struct {
 	Replicas int32 `json:"replicas"`
 
 	// UpdatedReplicas is the number of sandboxes that have been successfully updated.
+	// For template mode this means the sandbox carries this ops' stamp
+	// (delivered by a round or by the no-op fast path). It records delivery
+	// history: a newer ops may later bring the sandbox to a newer template.
 	UpdatedReplicas int32 `json:"updatedReplicas"`
 
 	// FailedReplicas is the number of sandboxes that failed to update.
@@ -130,6 +152,17 @@ type SandboxUpdateOpsStatus struct {
 
 	// UpdatingReplicas is the number of sandboxes currently being updated.
 	UpdatingReplicas int32 `json:"updatingReplicas"`
+
+	// WaitingReplicas is the number of sandboxes occupied by another ops'
+	// in-flight round; this ops waits for the round's terminal state.
+	// +optional
+	WaitingReplicas int32 `json:"waitingReplicas,omitempty"`
+
+	// SupersededReplicas is the number of sandboxes carrying a stamp newer
+	// than this ops; they are settled as superseded and never re-updated.
+	// Template mode only.
+	// +optional
+	SupersededReplicas int32 `json:"supersededReplicas,omitempty"`
 
 	// Conditions represents the latest available observations.
 	// +listType=map

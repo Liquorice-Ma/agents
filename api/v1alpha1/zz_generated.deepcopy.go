@@ -2126,6 +2126,7 @@ func (in *SandboxUpdateOpsSpec) DeepCopyInto(out *SandboxUpdateOpsSpec) {
 	}
 	in.UpdateStrategy.DeepCopyInto(&out.UpdateStrategy)
 	in.Patch.DeepCopyInto(&out.Patch)
+	in.EmbeddedSandboxTemplate.DeepCopyInto(&out.EmbeddedSandboxTemplate)
 	if in.Lifecycle != nil {
 		in, out := &in.Lifecycle, &out.Lifecycle
 		*out = new(SandboxLifecycle)
