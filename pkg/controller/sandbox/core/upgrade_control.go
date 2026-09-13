@@ -27,6 +27,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils"
@@ -452,6 +453,17 @@ func (r *UpgradeControl) performRecreateUpgrade(ctx context.Context, args Ensure
 	cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
 	if pCond == nil || pCond.Status != corev1.ConditionTrue {
 		klog.InfoS("Waiting for new pod to be ready", "sandbox", klog.KObj(box))
+		// An unschedulable Pod may have no container status; terminate the round to release pending.
+		if scheduled := utils.GetPodCondition(&pod.Status, corev1.PodScheduled); scheduled != nil &&
+			scheduled.Status == corev1.ConditionFalse && scheduled.Reason == corev1.PodReasonUnschedulable {
+			cond.Status = metav1.ConditionFalse
+			cond.Reason = agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed
+			cond.Message = utils.TruncateConditionMessage(fmt.Sprintf("Pod %s: %s", scheduled.Reason, scheduled.Message))
+			utils.SetSandboxCondition(newStatus, *cond)
+			logf.FromContext(ctx).Info("Upgrade pod is unschedulable", "sandbox", klog.KObj(box), "message", scheduled.Message)
+			r.recordUpgradeEvent(box, corev1.EventTypeWarning, EventUpgradePodFailed, "%s", cond.Message)
+			return false, nil
+		}
 		for _, cStatus := range pod.Status.ContainerStatuses {
 			if cStatus.State.Waiting != nil {
 				reason := cStatus.State.Waiting.Reason

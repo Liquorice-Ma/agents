@@ -110,6 +110,7 @@ func TestEnsureUpdateOpsRoundTerminal(t *testing.T) {
 		wantPending   string
 		wantStamp     string
 		wantPolicyNil bool
+		unschedulable bool
 	}{
 		{
 			name:        "no pending record is a no-op",
@@ -177,6 +178,29 @@ func TestEnsureUpdateOpsRoundTerminal(t *testing.T) {
 			wantPatched: true,
 		},
 		{
+			name: "发起 SUO 已删除时不可调度仍释放 template 轮次且保留旧 stamp",
+			box: newRoundTerminalSandbox(withObservedCurrentSpec(),
+				withUpgradingCondition(agentsv1alpha1.SandboxUpgradingReasonUpgradePod, metav1.ConditionFalse),
+				func(box *agentsv1alpha1.Sandbox) {
+					box.Status.Phase = agentsv1alpha1.SandboxUpgrading
+					box.Annotations[agentsv1alpha1.AnnotationUpdateOpsRevision] = "2026-08-11T00:00:00Z/older-ops"
+				}),
+			unschedulable: true,
+			wantPatched:   true,
+			wantStamp:     "2026-08-11T00:00:00Z/older-ops",
+		},
+		{
+			name: "发起 SUO 已删除时不可调度仍释放 patch 轮次",
+			box: newRoundTerminalSandbox(withObservedCurrentSpec(),
+				withUpgradingCondition(agentsv1alpha1.SandboxUpgradingReasonUpgradePod, metav1.ConditionFalse),
+				func(box *agentsv1alpha1.Sandbox) {
+					box.Status.Phase = agentsv1alpha1.SandboxUpgrading
+					box.Annotations[agentsv1alpha1.AnnotationUpdateOpsPendingRevision] = agentsv1alpha1.UpdateOpsPatchPendingPrefix + testPendingRevision
+				}),
+			unschedulable: true,
+			wantPatched:   true,
+		},
+		{
 			name: "checkpoint failure clears pending record without stamping",
 			box: newRoundTerminalSandbox(withObservedCurrentSpec(),
 				withUpgradingCondition(agentsv1alpha1.SandboxUpgradingReasonCheckpointFailed, metav1.ConditionFalse)),
@@ -237,9 +261,29 @@ func TestEnsureUpdateOpsRoundTerminal(t *testing.T) {
 			require.NoError(t, agentsv1alpha1.AddToScheme(scheme))
 			cli := fake.NewClientBuilder().
 				WithScheme(scheme).
+				WithStatusSubresource(&agentsv1alpha1.Sandbox{}).
 				WithObjects(tt.box).
 				Build()
 			r := &SandboxReconciler{Client: cli, Scheme: scheme}
+
+			if tt.unschedulable {
+				pod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+						agentsv1alpha1.PodLabelTemplateHash: tt.box.Status.UpdateRevision,
+					}},
+					Status: corev1.PodStatus{Phase: corev1.PodPending, Conditions: []corev1.PodCondition{{
+						Type: corev1.PodScheduled, Status: corev1.ConditionFalse,
+						Reason: corev1.PodReasonUnschedulable, Message: "node selector does not match",
+					}}},
+				}
+				newStatus := tt.box.Status.DeepCopy()
+				control := core.NewUpgradeControl(cli, nil, nil, nil, nil, nil, nil, nil)
+				require.NoError(t, control.EnsureSandboxUpgraded(context.Background(), core.EnsureFuncArgs{
+					Box: tt.box, Pod: pod, NewStatus: newStatus,
+				}))
+				require.NoError(t, r.updateSandboxStatus(context.Background(), *newStatus, tt.box))
+				require.NoError(t, cli.Get(context.Background(), client.ObjectKeyFromObject(tt.box), tt.box))
+			}
 
 			patched, err := r.ensureUpdateOpsRoundTerminal(context.Background(), tt.box)
 			require.NoError(t, err)

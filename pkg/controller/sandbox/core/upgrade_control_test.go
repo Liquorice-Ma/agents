@@ -1122,6 +1122,24 @@ func TestEnsureSandboxUpgraded_CheckpointRestore(t *testing.T) {
 
 func TestPerformRecreateUpgrade_ContainerStatuses(t *testing.T) {
 	now := metav1.Now()
+	pendingPod := func(scheduled *corev1.PodCondition) *corev1.Pod {
+		pod := newRunningPod()
+		pod.Labels[agentsv1alpha1.PodLabelTemplateHash] = "new-revision"
+		pod.Status.Phase = corev1.PodPending
+		pod.Status.Conditions = nil
+		pod.Status.ContainerStatuses = nil
+		if scheduled != nil {
+			pod.Status.Conditions = []corev1.PodCondition{*scheduled}
+		}
+		return pod
+	}
+	upgradingStatus := &agentsv1alpha1.SandboxStatus{
+		Phase: agentsv1alpha1.SandboxUpgrading, UpdateRevision: "new-revision",
+		Conditions: []metav1.Condition{{
+			Type: string(agentsv1alpha1.SandboxConditionUpgrading), Status: metav1.ConditionFalse,
+			Reason: agentsv1alpha1.SandboxUpgradingReasonUpgradePod, LastTransitionTime: now,
+		}},
+	}
 
 	tests := []struct {
 		name            string
@@ -1133,7 +1151,55 @@ func TestPerformRecreateUpgrade_ContainerStatuses(t *testing.T) {
 		expectPhase     agentsv1alpha1.SandboxPhase
 		expectReason    string
 		expectCondition map[string]metav1.ConditionStatus
+		expectMessage   string
 	}{
+		{
+			name: "不可调度且无容器状态时升级失败",
+			pod: pendingPod(&corev1.PodCondition{
+				Type: corev1.PodScheduled, Status: corev1.ConditionFalse,
+				Reason: corev1.PodReasonUnschedulable, Message: "0/3 nodes are available: insufficient cpu",
+			}),
+			box: newUpgradeTestSandbox(nil, nil), existingStatus: upgradingStatus,
+			expectPhase: agentsv1alpha1.SandboxUpgrading, expectReason: agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed,
+			expectCondition: map[string]metav1.ConditionStatus{
+				string(agentsv1alpha1.SandboxConditionUpgrading): metav1.ConditionFalse,
+			},
+			expectMessage: "Pod Unschedulable: 0/3 nodes are available: insufficient cpu",
+		},
+		{
+			name: "CheckpointRestore 的新 Pod 不可调度时升级失败",
+			pod: pendingPod(&corev1.PodCondition{
+				Type: corev1.PodScheduled, Status: corev1.ConditionFalse,
+				Reason: corev1.PodReasonUnschedulable, Message: "node selector does not match",
+			}),
+			box: newUpgradeTestSandbox(nil, &agentsv1alpha1.SandboxUpgradePolicy{
+				Type: agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore,
+			}),
+			existingStatus: upgradingStatus,
+			expectPhase:    agentsv1alpha1.SandboxUpgrading, expectReason: agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed,
+			expectMessage: "Pod Unschedulable: node selector does not match",
+		},
+		{
+			name: "尚无调度结果时继续等待",
+			pod:  pendingPod(nil), box: newUpgradeTestSandbox(nil, nil), existingStatus: upgradingStatus,
+			expectPhase: agentsv1alpha1.SandboxUpgrading, expectReason: agentsv1alpha1.SandboxUpgradingReasonUpgradePod,
+		},
+		{
+			name: "调度器临时错误不判为终态失败",
+			pod: pendingPod(&corev1.PodCondition{
+				Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Reason: "SchedulerError",
+			}),
+			box: newUpgradeTestSandbox(nil, nil), existingStatus: upgradingStatus,
+			expectPhase: agentsv1alpha1.SandboxUpgrading, expectReason: agentsv1alpha1.SandboxUpgradingReasonUpgradePod,
+		},
+		{
+			name: "已调度时忽略残留不可调度原因",
+			pod: pendingPod(&corev1.PodCondition{
+				Type: corev1.PodScheduled, Status: corev1.ConditionTrue, Reason: corev1.PodReasonUnschedulable,
+			}),
+			box: newUpgradeTestSandbox(nil, nil), existingStatus: upgradingStatus,
+			expectPhase: agentsv1alpha1.SandboxUpgrading, expectReason: agentsv1alpha1.SandboxUpgradingReasonUpgradePod,
+		},
 		{
 			name: "pod not ready with container waiting abnormal reason sets UpgradePodFailed",
 			pod: func() *corev1.Pod {
@@ -1345,6 +1411,20 @@ func TestPerformRecreateUpgrade_ContainerStatuses(t *testing.T) {
 				}
 				if cond.Status != expectedStatus {
 					t.Errorf("Expected condition %q status %q, got %q", condType, expectedStatus, cond.Status)
+				}
+			}
+			if tt.expectMessage != "" {
+				cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
+				if assert.NotNil(t, cond) {
+					assert.Equal(t, tt.expectMessage, cond.Message)
+				}
+				recorder := control.upgradeControl.recorder.(*record.FakeRecorder)
+				select {
+				case event := <-recorder.Events:
+					assert.Contains(t, event, corev1.EventTypeWarning+" "+EventUpgradePodFailed)
+					assert.Contains(t, event, tt.expectMessage)
+				default:
+					t.Fatal("未收到不可调度升级失败事件")
 				}
 			}
 		})

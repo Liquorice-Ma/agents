@@ -174,6 +174,26 @@ func TestClassifyTemplateSandbox(t *testing.T) {
 			want: sandboxFailed,
 		},
 		{
+			name: "不可调度轮次释放后恢复 SUO 可接管",
+			mod: func(sbx *agentsv1alpha1.Sandbox) {
+				sbx.Labels[agentsv1alpha1.LabelSandboxUpdateOps] = "failed-ops"
+				sbx.Status.Phase = agentsv1alpha1.SandboxUpgrading
+				sbx.Status.Conditions = upgradingCond(agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed, metav1.ConditionFalse)
+				sbx.Status.Conditions[0].Message = "Pod Unschedulable: node selector does not match"
+			},
+			want: sandboxCandidate,
+		},
+		{
+			name: "失败轮次尚未释放时恢复 SUO 仍需等待",
+			mod: func(sbx *agentsv1alpha1.Sandbox) {
+				sbx.Labels[agentsv1alpha1.LabelSandboxUpdateOps] = "failed-ops"
+				sbx.Annotations = map[string]string{agentsv1alpha1.AnnotationUpdateOpsPendingRevision: olderRev}
+				sbx.Status.Phase = agentsv1alpha1.SandboxUpgrading
+				sbx.Status.Conditions = upgradingCond(agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed, metav1.ConditionFalse)
+			},
+			want: sandboxWaiting,
+		},
+		{
 			name: "phase outside state filter is skipped",
 			mod: func(sbx *agentsv1alpha1.Sandbox) {
 				sbx.Status.Phase = agentsv1alpha1.SandboxPaused

@@ -2205,6 +2205,8 @@ func TestUpdateStatus_RecordsPhaseEvent(t *testing.T) {
 		name           string
 		oldPhase       agentsv1alpha1.SandboxUpdateOpsPhase
 		newPhase       agentsv1alpha1.SandboxUpdateOpsPhase
+		oldStatus      *agentsv1alpha1.SandboxUpdateOpsStatus
+		newStatus      *agentsv1alpha1.SandboxUpdateOpsStatus
 		expectEvent    bool
 		expectPrefix   string
 		expectContains string
@@ -2231,6 +2233,43 @@ func TestUpdateStatus_RecordsPhaseEvent(t *testing.T) {
 			newPhase:    agentsv1alpha1.SandboxUpdateOpsUpdating,
 			expectEvent: false,
 		},
+		{
+			name: "完成时清除等待计数",
+			oldStatus: &agentsv1alpha1.SandboxUpdateOpsStatus{
+				Phase: agentsv1alpha1.SandboxUpdateOpsUpdating, Replicas: 2,
+				UpdatedReplicas: 1, WaitingReplicas: 1,
+			},
+			newStatus: &agentsv1alpha1.SandboxUpdateOpsStatus{
+				Phase: agentsv1alpha1.SandboxUpdateOpsCompleted, Replicas: 2, UpdatedReplicas: 2,
+			},
+			expectEvent:    true,
+			expectPrefix:   corev1.EventTypeNormal + " " + eventReasonSandboxUpdateOpsPhaseChanged,
+			expectContains: "phase changed from Updating to Completed",
+		},
+		{
+			name: "阶段不变时等待计数也能归零",
+			oldStatus: &agentsv1alpha1.SandboxUpdateOpsStatus{
+				Phase: agentsv1alpha1.SandboxUpdateOpsUpdating, Replicas: 1, WaitingReplicas: 1,
+			},
+			newStatus: &agentsv1alpha1.SandboxUpdateOpsStatus{
+				Phase: agentsv1alpha1.SandboxUpdateOpsUpdating, Replicas: 1, UpdatingReplicas: 1,
+			},
+		},
+		{
+			name: "清除全部计数和可选状态字段",
+			oldStatus: &agentsv1alpha1.SandboxUpdateOpsStatus{
+				Phase: agentsv1alpha1.SandboxUpdateOpsUpdating, Replicas: 5,
+				UpdatedReplicas: 1, UpdatingReplicas: 1, FailedReplicas: 1,
+				WaitingReplicas: 1, SupersededReplicas: 1,
+				Conditions: []metav1.Condition{{
+					Type: "Progressing", Status: metav1.ConditionTrue, Reason: "Updating",
+					LastTransitionTime: metav1.Now(),
+				}},
+			},
+			newStatus: &agentsv1alpha1.SandboxUpdateOpsStatus{
+				Phase: agentsv1alpha1.SandboxUpdateOpsUpdating,
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -2239,6 +2278,9 @@ func TestUpdateStatus_RecordsPhaseEvent(t *testing.T) {
 			ops.Status.Replicas = 3
 			ops.Status.UpdatedReplicas = 1
 			ops.Status.UpdatingReplicas = 2
+			if tt.oldStatus != nil {
+				ops.Status = *tt.oldStatus.DeepCopy()
+			}
 			recorder := record.NewFakeRecorder(10)
 			fakeClient := fake.NewClientBuilder().
 				WithScheme(testScheme).
@@ -2252,16 +2294,23 @@ func TestUpdateStatus_RecordsPhaseEvent(t *testing.T) {
 			}
 			newStatus := ops.Status.DeepCopy()
 			newStatus.Phase = tt.newPhase
-			if tt.newPhase == agentsv1alpha1.SandboxUpdateOpsFailed {
+			if tt.newStatus != nil {
+				newStatus = tt.newStatus.DeepCopy()
+			} else if tt.newPhase == agentsv1alpha1.SandboxUpdateOpsFailed {
 				newStatus.FailedReplicas = 1
 				newStatus.UpdatingReplicas = 0
 			} else {
 				newStatus.UpdatedReplicas = 2
 			}
 
+			original := ops.DeepCopy()
 			err := r.updateStatus(context.Background(), ops, newStatus)
 
-			assert.NoError(t, err)
+			require.NoError(t, err)
+			persisted := &agentsv1alpha1.SandboxUpdateOps{}
+			require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(ops), persisted))
+			assert.Equal(t, *newStatus, persisted.Status)
+			assert.Equal(t, original, ops)
 			if tt.expectEvent {
 				assertUpdateOpsRecorderEvent(t, recorder, tt.expectPrefix, tt.expectContains)
 			} else {

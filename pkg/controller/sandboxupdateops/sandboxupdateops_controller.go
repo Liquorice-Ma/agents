@@ -18,7 +18,6 @@ package sandboxupdateops
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"reflect"
@@ -36,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
@@ -698,17 +698,14 @@ func (r *Reconciler) updateStatus(ctx context.Context, ops *agentsv1alpha1.Sandb
 	}
 	oldPhase := ops.Status.Phase
 
-	by, _ := json.Marshal(newStatus)
-	patchStatus := fmt.Sprintf(`{"status":%s}`, string(by))
-	rcvObject := &agentsv1alpha1.SandboxUpdateOps{
-		ObjectMeta: metav1.ObjectMeta{Namespace: ops.Namespace, Name: ops.Name},
-	}
-	err := client.IgnoreNotFound(
-		r.Status().Patch(ctx, rcvObject, client.RawPatch(types.MergePatchType, []byte(patchStatus))))
+	// Diff from the old status so fields tagged omitempty are removed when reset to zero.
+	modified := ops.DeepCopy()
+	modified.Status = *newStatus.DeepCopy()
+	err := client.IgnoreNotFound(r.Status().Patch(ctx, modified, client.MergeFrom(ops)))
 	if err != nil {
-		klog.ErrorS(err, "Failed to update SandboxUpdateOps status", "ops", klog.KObj(ops), "patch", patchStatus)
+		logf.FromContext(ctx).Error(err, "Failed to update SandboxUpdateOps status", "ops", klog.KObj(ops))
 	} else {
-		klog.InfoS("Successfully updated SandboxUpdateOps status", "ops", klog.KObj(ops), "patch", patchStatus)
+		logf.FromContext(ctx).Info("Successfully updated SandboxUpdateOps status", "ops", klog.KObj(ops), "status", newStatus)
 		r.recordPhaseEvent(ops, oldPhase, newStatus)
 	}
 	return err
