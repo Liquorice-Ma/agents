@@ -19,7 +19,6 @@ package sandbox
 import (
 	"cmp"
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"reflect"
@@ -30,7 +29,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -353,6 +351,9 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 		return reconcile.Result{}, err
 	}
 
+	// hash 注解写入可能返回新对象，后续执行与状态写入必须使用同一观察版本。
+	args.Box = box
+
 	// Check ShutdownTime and PauseTime.
 	result, done, timerErr := r.checkTimers(ctx, box, metav1.Now())
 	if done {
@@ -419,6 +420,19 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 		ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerEnsureSandboxUpgraded)
 		err = r.getControl(args.Pod).EnsureSandboxUpgraded(ctx, args)
 		tracing.EndSpan(ctx, span, err)
+		// 即使 Pod 不再产生事件，也必须在预算耗尽时结束等待。
+		if newStatus.Phase == agentsv1alpha1.SandboxUpgrading && newStatus.UpgradeProgress != nil {
+			cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
+			if !core.IsUpgradeFailed(cond) && (cond == nil || cond.Status != metav1.ConditionTrue) {
+				delay := time.Until(newStatus.UpgradeProgress.Deadline.Time)
+				if delay <= 0 {
+					delay = time.Millisecond
+				}
+				if requeueAfter == 0 || delay < requeueAfter {
+					requeueAfter = delay
+				}
+			}
+		}
 	case agentsv1alpha1.SandboxRecycling:
 		ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerEnsureSandboxRecycled)
 		requeueAfter, err = r.getControl(args.Pod).EnsureSandboxRecycled(ctx, args)
@@ -466,8 +480,15 @@ func (r *SandboxReconciler) preparePausedPhase(ctx context.Context, args core.En
 		// Add finalizer on first entry into paused state to ensure
 		// controller-mediated cleanup if the sandbox is deleted while paused.
 		if !controllerutil.ContainsFinalizer(box, core.SandboxFinalizer) {
-			if _, err := utils.PatchFinalizer(ctx, r.Client, box, utils.AddFinalizerOpType, core.SandboxFinalizer); err != nil {
+			updated, err := utils.PatchFinalizer(ctx, r.Client, box, utils.AddFinalizerOpType, core.SandboxFinalizer)
+			if err != nil {
 				return false, fmt.Errorf("failed to add finalizer for paused sandbox: %w", err)
+			}
+			// PatchFinalizer 修改的是深拷贝，需把新的 resourceVersion 和 finalizers
+			// 回写同一对象，否则后续带乐观锁的状态 patch 会因版本陈旧而冲突。
+			if newBox, ok := updated.(*agentsv1alpha1.Sandbox); ok {
+				box.ResourceVersion = newBox.ResourceVersion
+				box.Finalizers = newBox.Finalizers
 			}
 			logger.Info("Add finalizer for paused sandbox")
 		}
@@ -574,9 +595,15 @@ func (r *SandboxReconciler) finalizeResumePhase(ctx context.Context, args core.E
 	if !controllerutil.ContainsFinalizer(box, core.SandboxFinalizer) {
 		return
 	}
-	if _, err := utils.PatchFinalizer(ctx, r.Client, box, utils.RemoveFinalizerOpType, core.SandboxFinalizer); err != nil {
+	updated, err := utils.PatchFinalizer(ctx, r.Client, box, utils.RemoveFinalizerOpType, core.SandboxFinalizer)
+	if err != nil {
 		klog.FromContext(ctx).Error(err, "failed to remove finalizer after resume, proceeding anyway", "sandbox", klog.KObj(box))
 		return
+	}
+	// 同 preparePausedPhase：回写新的 resourceVersion 和 finalizers，避免后续状态 patch 版本陈旧。
+	if newBox, ok := updated.(*agentsv1alpha1.Sandbox); ok {
+		box.ResourceVersion = newBox.ResourceVersion
+		box.Finalizers = newBox.Finalizers
 	}
 	klog.FromContext(ctx).Info("Removed finalizer after resume", "sandbox", klog.KObj(box))
 }
@@ -645,18 +672,20 @@ func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus a
 	}
 	ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerUpdateStatus, statusAttrs...)
 
-	by, _ := json.Marshal(newStatus)
-	patchStatus := fmt.Sprintf(`{"status":%s}`, string(by))
-	rcvObject := &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Namespace: box.Namespace, Name: box.Name}}
-	err := client.IgnoreNotFound(r.Status().Patch(ctx, rcvObject, client.RawPatch(types.MergePatchType, []byte(patchStatus))))
+	// 防止旧 hook 或旧目标的执行结果覆盖并发下发的新 SUO。
+	rcvObject := box.DeepCopy()
+	rcvObject.Status = newStatus
+	err := client.IgnoreNotFound(r.Status().Patch(ctx, rcvObject,
+		client.MergeFromWithOptions(box.DeepCopy(), client.MergeFromWithOptimisticLock{})))
 	tracing.EndSpan(ctx, span, err)
 	if err != nil {
-		klog.FromContext(ctx).Error(err, "update sandbox status failed", "sandbox", klog.KObj(box), "patchStatus", patchStatus)
+		klog.FromContext(ctx).Error(err, "update sandbox status failed", "sandbox", klog.KObj(box))
 		return err
 	}
 	core.ResourceVersionExpectations.Expect(rcvObject)
 	klog.FromContext(ctx).Info("update sandbox status success", "sandbox", klog.KObj(box), "status", utils.DumpJson(newStatus))
 	box.Status = newStatus
+	box.ResourceVersion = rcvObject.ResourceVersion
 	r.recordSandboxPhaseEvent(box, oldPhase, newStatus)
 	// Update metrics after status change (pod=nil: container metrics already recorded in Reconcile)
 	recordSandboxMetrics(box, nil)
@@ -717,6 +746,10 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 	hash, _ := core.HashSandbox(box)
 	newStatus.ObservedGeneration = box.Generation
 	newStatus.UpdateRevision = hash
+	operationID := box.Annotations[agentsv1alpha1.AnnotationUpgradeOperation]
+	// 同轮身份只由持久化 UID 决定；删除 SUO 清理归属标签不能重置预算。
+	sameOperation := operationID != "" && newStatus.UpgradeProgress != nil &&
+		newStatus.UpgradeProgress.OperationID == operationID
 	if newStatus.Phase == "" {
 		newStatus.Phase = agentsv1alpha1.SandboxPending
 	}
@@ -753,6 +786,17 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 			}
 		}
 
+		// 新操作先于旧 Pod 健康检查接纳，使错误镜像和丢失 Pod 仍能进入显式补救流程。
+		if core.RequiresUpgradeSandbox(box) && (newStatus.UpdateRevision != box.Status.UpdateRevision || isNewUpgradeOperation(box)) {
+			newStatus.Phase = agentsv1alpha1.SandboxUpgrading
+			if !sameOperation {
+				newStatus.UpgradeProgress = nil
+			}
+			utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
+			utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
+			break
+		}
+
 		// Pod terminal detection (only when recycle is NOT triggered)
 		if pod == nil || !pod.DeletionTimestamp.IsZero() {
 			newStatus.Phase = agentsv1alpha1.SandboxFailed
@@ -764,23 +808,17 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 			return newStatus, true
 		}
 
-		// If a pod template change requires a recreate upgrade, transition to Upgrading first;
-		// otherwise, if the sandbox is paused, transition to Paused.
+		// If a pod template change requires the upgrade lifecycle, transition to
+		// Upgrading first; otherwise, if the sandbox is paused, transition to Paused.
 		// To prevent loss of state information, the state immediately before Paused must currently be Running.
 		// Note: upgrade detection takes priority over spec.paused for all sandboxes. A user
 		// pausing a running sandbox with a pending template change will see it upgrade first
 		// and pause afterwards. This is intentional — upgrading from Running is safer than
 		// upgrading from Paused (which requires a resume-then-upgrade detour).
-		if newStatus.UpdateRevision != box.Status.UpdateRevision &&
-			core.RequiresPodReplacementUpgrade(box) {
-			klog.FromContext(ctx).Info("Detected upgrade trigger", "sandbox", klog.KObj(box),
-				"oldRevision", box.Status.UpdateRevision,
-				"newRevision", newStatus.UpdateRevision)
-			newStatus.Phase = agentsv1alpha1.SandboxUpgrading
-			utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
-			// Entering Upgrading from Running must not carry a Paused condition.
-			utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
-		} else if box.Spec.Paused {
+		//
+		// Sandboxes without an upgrade policy never enter Upgrading: their template
+		// changes are applied in place from the Running phase (the SandboxClaim path).
+		if box.Spec.Paused {
 			// The paused and resumed condition are exclusive
 			utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionResumed))
 			newStatus.Phase = agentsv1alpha1.SandboxPaused
@@ -798,7 +836,21 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 		// the sandbox is still paused do we check for the upgrade trigger
 		// annotation.
 		if cond != nil && cond.Status == metav1.ConditionTrue {
-			if !box.Spec.Paused {
+			// Support upgrading a sandbox while it is paused. A fully paused
+			// sandbox has no pod (EnsureSandboxPaused deletes it), so detect
+			// the template change via the revision hash instead of pod labels.
+			if core.RequiresUpgradeSandbox(box) && (newStatus.UpdateRevision != box.Status.UpdateRevision || isNewUpgradeOperation(box)) {
+				klog.FromContext(ctx).Info("Detected upgrade trigger", "sandbox", klog.KObj(box),
+					"oldRevision", box.Status.UpdateRevision,
+					"newRevision", newStatus.UpdateRevision)
+				newStatus.Phase = agentsv1alpha1.SandboxUpgrading
+				if !sameOperation {
+					newStatus.UpgradeProgress = nil
+				}
+				utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
+				// Do NOT remove SandboxConditionPaused here: the upgrade Resuming stage
+				// relies on it to decide whether the sandbox must be woken up first.
+			} else if !box.Spec.Paused {
 				// Do NOT remove SandboxConditionPaused here: it is kept through
 				// Resuming and removed by finalizeResumePhase once Resumed=True.
 				newStatus.Phase = agentsv1alpha1.SandboxResuming
@@ -815,6 +867,9 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 				// after resume succeeds (SandboxUpgradingReasonResumeSucceed).
 				klog.FromContext(ctx).Info("Detected upgrade resume trigger annotation", "sandbox", klog.KObj(box))
 				newStatus.Phase = agentsv1alpha1.SandboxUpgrading
+				if !sameOperation {
+					newStatus.UpgradeProgress = nil
+				}
 				utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
 				// Do NOT remove SandboxConditionPaused here: the upgrade Resuming stage
 				// relies on it to decide whether the sandbox must be woken up first.
@@ -836,25 +891,54 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 		// transitions) is handled entirely by EnsureSandboxRecycled.
 
 	case agentsv1alpha1.SandboxUpgrading:
-		// This indicates the podTemplate has changed again during an ongoing upgrade.
-		// Determine the resume step after the desired template changes during an ongoing upgrade.
-		if newStatus.UpdateRevision != box.Status.UpdateRevision {
-			upgradeCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
-			if upgradeCond != nil {
-				resumeReason := determineUpgradeResumeReason(pod, newStatus, upgradeCond)
-				klog.FromContext(ctx).Info("podTemplate changed during upgrade, resetting condition Upgrading reason",
-					"sandbox", klog.KObj(box),
-					"previousReason", upgradeCond.Reason,
-					"oldRevision", box.Status.UpdateRevision,
-					"newRevision", newStatus.UpdateRevision,
-					"resumeReason", resumeReason)
-				upgradeCond.Reason = resumeReason
-				upgradeCond.Message = ""
-				utils.SetSandboxCondition(newStatus, *upgradeCond)
+		upgradeCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
+		switch {
+		case isNewUpgradeOperation(box):
+			// 新 SUO 从完整生命周期开始，不受旧 Failed 步骤和旧 hook 成功记录影响。
+			newStatus.UpgradeProgress = nil
+			utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
+			if box.Annotations[agentsv1alpha1.AnnotationUpgradeResumeTrigger] != agentsv1alpha1.True {
+				// 新操作已直接下发目标，不再等待旧恢复阶段的错误镜像就绪。
+				utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
 			}
+		case upgradeCond != nil && upgradeCond.Reason == agentsv1alpha1.SandboxUpgradingReasonResumeSucceed &&
+			box.Annotations[agentsv1alpha1.AnnotationUpgradeResumeTrigger] != agentsv1alpha1.True &&
+			(box.Labels[agentsv1alpha1.LabelSandboxUpdateOps] != "" || newStatus.UpdateRevision != box.Status.UpdateRevision):
+			// 第二阶段已下发的模板即使遇到 SUO 删除也继续接纳，保留恢复阶段的预算。
+			upgradeCond.Reason = agentsv1alpha1.SandboxUpgradingReasonPreUpgrade
+			upgradeCond.Message = ""
+			utils.SetSandboxCondition(newStatus, *upgradeCond)
+			if newStatus.UpgradeProgress != nil {
+				newStatus.UpgradeProgress.Revision = hash
+			}
+		case newStatus.UpdateRevision != box.Status.UpdateRevision:
+			if sameOperation {
+				// 同 UID 修改目标不重置预算或 hook；由执行层以原进度拒绝本次变更。
+				break
+			}
+			resumeReason := agentsv1alpha1.SandboxUpgradingReasonPreUpgrade
+			if box.Annotations[agentsv1alpha1.AnnotationUpgradeOperation] == "" {
+				// 未携带操作身份的历史直接更新仍保留原有恢复 feature gate。
+				resumeReason = determineUpgradeResumeReason(pod, newStatus, upgradeCond)
+			}
+			newStatus.UpgradeProgress = nil
+			utils.SetSandboxCondition(newStatus, metav1.Condition{
+				Type: string(agentsv1alpha1.SandboxConditionUpgrading), Status: metav1.ConditionFalse,
+				Reason: resumeReason, ObservedGeneration: box.Generation, LastTransitionTime: metav1.Now(),
+			})
 		}
 	}
+	if newStatus.Phase == agentsv1alpha1.SandboxUpgrading {
+		// 显式升级接管后不再让旧 Claim Condition 参与交付判断。
+		utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
+	}
 	return newStatus, false
+}
+
+// 保留操作 UID 注解意味着删除旧 SUO 本身不会启动新轮次；同名重建仍由 UID 区分。
+func isNewUpgradeOperation(box *agentsv1alpha1.Sandbox) bool {
+	operationID := box.Annotations[agentsv1alpha1.AnnotationUpgradeOperation]
+	return operationID != "" && (box.Status.UpgradeProgress == nil || box.Status.UpgradeProgress.OperationID != operationID)
 }
 
 // isRecycleTriggered returns true when the recycle annotation and the recycle-enabled

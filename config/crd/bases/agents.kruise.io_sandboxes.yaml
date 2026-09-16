@@ -506,14 +506,20 @@ spec:
               upgradePolicy:
                 description: UpgradePolicy defines the upgrade strategy for the sandbox.
                 properties:
+                  timeoutSeconds:
+                    description: 每个 Sandbox 的完整升级预算（秒），不含 SUO 排队时间；未指定时为 300 秒。
+                    format: int32
+                    minimum: 1
+                    type: integer
                   type:
                     description: |-
                       Type specifies the upgrade policy type.
                       When empty (default), upgrading is disabled.
-                      Supported values: Recreate, CheckpointRestore.
+                      Supported values: Recreate, CheckpointRestore, InplaceUpdate.
                     enum:
                     - Recreate
                     - CheckpointRestore
+                    - InplaceUpdate
                     type: string
                 type: object
               volumeClaimTemplates:
@@ -675,6 +681,42 @@ spec:
               updateRevision:
                 description: UpdateRevision is the template-hash calculated from `spec.template`.
                 type: string
+              upgradeProgress:
+                description: 本轮升级的持久化进度，用于预算和 hook 防重复；新 SUO 不继承旧轮次。
+                properties:
+                  deadline:
+                    description: 本轮截止时间，创建时固定；修改配置不延长已经开始的预算。
+                    format: date-time
+                    type: string
+                  operationID:
+                    description: 发起本轮升级的 SUO UID；非 SUO 触发时为空。
+                    type: string
+                  postUpgrade:
+                    enum:
+                    - Running
+                    - Succeeded
+                    type: string
+                  preUpgrade:
+                    description: 执行前先记录 Running；重启后观察到 Running 表示结果未知，禁止盲目重跑。
+                    enum:
+                    - Running
+                    - Succeeded
+                    type: string
+                  revision:
+                    description: 本轮实际接纳的目标 revision。
+                    type: string
+                  sourcePodUID:
+                    description: 本轮升级前的 Pod UID；重建策略必须观察到不同 UID，不能以 hash 相同冒充替换。
+                    type: string
+                  startedAt:
+                    description: 开始执行本轮生命周期的时刻，重试及 Controller 重启不重置。
+                    format: date-time
+                    type: string
+                required:
+                - deadline
+                - revision
+                - startedAt
+                type: object
             type: object
         required:
         - spec

@@ -121,8 +121,17 @@ func (c *Cache) NewSandboxWaitReadyTask(ctx context.Context, sbx *agentsv1alpha1
 			return false, fmt.Errorf("sandbox startup failed (reason=%s): %s", readyCond.Reason, readyCond.Message)
 		}
 		inplaceCond := utils.GetSandboxCondition(&s.Status, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
-		if inplaceCond != nil && inplaceCond.Reason == agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating {
-			return false, nil
+		if inplaceCond != nil && s.Spec.UpgradePolicy == nil {
+			// 旧轮次的 Condition 不能证明当前目标可交付，也不能终止当前等待。
+			if inplaceCond.ObservedGeneration != s.Generation {
+				return false, nil
+			}
+			if inplaceCond.Status == metav1.ConditionFalse && inplaceCond.Reason == agentsv1alpha1.SandboxInplaceUpdateReasonFailed {
+				return false, fmt.Errorf("sandbox in-place update failed: %s", inplaceCond.Message)
+			}
+			if inplaceCond.Status != metav1.ConditionTrue || inplaceCond.Reason != agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded {
+				return false, nil
+			}
 		}
 		state, _ := utils.GetSandboxState(s)
 		return state == agentsv1alpha1.SandboxStateRunning && s.Status.PodInfo.PodIP != "", nil

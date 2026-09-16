@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -37,6 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	sandboxcore "github.com/openkruise/agents/pkg/controller/sandbox/core"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 )
 
@@ -823,33 +825,105 @@ func TestReconcile_SkipsDeletedAndTerminalSandboxes(t *testing.T) {
 }
 
 func TestReconcile_MaxUnavailableLimitsConcurrency(t *testing.T) {
-	maxUnavail := intstrutil.FromInt32(1)
-	ops := newSandboxUpdateOps("test-ops", "default", agentsv1alpha1.SandboxUpdateOpsUpdating, false, &maxUnavail)
-	ops.Spec.Patch = mustMarshalPatch(corev1.PodTemplateSpec{
-		Spec: corev1.PodSpec{
-			Containers: []corev1.Container{
-				{Name: "main", Image: "busybox:2.0"},
-			},
-		},
-	})
-	// 1 sandbox already updating (Running phase, has ops label, generation mismatch), 2 candidates
-	sbxUpdating := newSandbox("sbx-updating", "default", "test-ops", agentsv1alpha1.SandboxRunning, nil)
-	sbxUpdating.Generation = 2
-	sbxUpdating.Status.ObservedGeneration = 1
-	sbxCandidate1 := newSandbox("sbx-candidate-1", "default", "", agentsv1alpha1.SandboxRunning, nil)
-	sbxCandidate2 := newSandbox("sbx-candidate-2", "default", "", agentsv1alpha1.SandboxRunning, nil)
-	r := newTestReconciler(ops, sbxUpdating, sbxCandidate1, sbxCandidate2)
+	for _, failed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("failed=%t", failed), func(t *testing.T) {
+			maxUnavail := intstrutil.FromInt32(1)
+			ops := newSandboxUpdateOps("test-ops", "default", agentsv1alpha1.SandboxUpdateOpsUpdating, false, &maxUnavail)
+			ops.Spec.Patch = mustMarshalPatch(corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Name: "main", Image: "busybox:2.0"},
+					},
+				},
+			})
+			// 更新中和已失败对象均占用窗口；剩余两个候选不得开始新操作。
+			ops.UID = "window-operation"
+			sbxUpdating := newSandbox("sbx-window", "default", "test-ops", agentsv1alpha1.SandboxRunning, nil)
+			sbxUpdating.Generation = 2
+			sbxUpdating.Status.ObservedGeneration = 1
+			sbxUpdating.Annotations = map[string]string{agentsv1alpha1.AnnotationUpgradeOperation: string(ops.UID)}
+			sbxUpdating.Status.UpgradeProgress = &agentsv1alpha1.SandboxUpgradeProgress{OperationID: string(ops.UID)}
+			if failed {
+				sbxUpdating.Status.ObservedGeneration = 2
+				sbxUpdating.Status.Conditions = []metav1.Condition{{
+					Type: string(agentsv1alpha1.SandboxConditionUpgrading), Status: metav1.ConditionFalse,
+					Reason: agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed,
+				}}
+			}
+			t.Cleanup(func() { ResourceVersionExpectations.Delete(sbxUpdating) })
+			sbxCandidate1 := newSandbox("sbx-candidate-1", "default", "", agentsv1alpha1.SandboxRunning, nil)
+			sbxCandidate2 := newSandbox("sbx-candidate-2", "default", "", agentsv1alpha1.SandboxRunning, nil)
+			r := newTestReconciler(ops, sbxUpdating, sbxCandidate1, sbxCandidate2)
 
-	_, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "test-ops", Namespace: "default"},
-	})
-	assert.NoError(t, err)
+			_, err := r.Reconcile(context.Background(), ctrl.Request{
+				NamespacedName: types.NamespacedName{Name: "test-ops", Namespace: "default"},
+			})
+			assert.NoError(t, err)
 
-	// With maxUnavailable=1 and 1 already updating, toUpgrade=0, so no candidates should be patched
-	updatedSbx1 := &agentsv1alpha1.Sandbox{}
-	err = r.Get(context.Background(), types.NamespacedName{Name: "sbx-candidate-1", Namespace: "default"}, updatedSbx1)
-	assert.NoError(t, err)
-	assert.Empty(t, updatedSbx1.Labels[agentsv1alpha1.LabelSandboxUpdateOps])
+			for _, candidate := range []*agentsv1alpha1.Sandbox{sbxCandidate1, sbxCandidate2} {
+				updated := &agentsv1alpha1.Sandbox{}
+				require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(candidate), updated))
+				require.Empty(t, updated.Labels[agentsv1alpha1.LabelSandboxUpdateOps])
+				require.Equal(t, candidate.Spec, updated.Spec)
+			}
+			updatedOps := &agentsv1alpha1.SandboxUpdateOps{}
+			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(ops), updatedOps))
+			require.Equal(t, agentsv1alpha1.SandboxUpdateOpsUpdating, updatedOps.Status.Phase)
+			if failed {
+				require.Equal(t, int32(1), updatedOps.Status.FailedReplicas)
+				require.Zero(t, updatedOps.Status.UpdatingReplicas)
+			} else {
+				require.Equal(t, int32(1), updatedOps.Status.UpdatingReplicas)
+				require.Zero(t, updatedOps.Status.FailedReplicas)
+			}
+		})
+	}
+}
+
+func TestClassifySandbox_OperationIdentity(t *testing.T) {
+	tests := []struct {
+		name, owner, operation, progress string
+		status                           metav1.ConditionStatus
+		reason                           string
+		unobserved                       bool
+		want                             sandboxUpdateState
+	}{
+		{name: "new identity with old success", owner: "identity-ops", operation: "new", progress: "old", status: metav1.ConditionTrue, reason: agentsv1alpha1.SandboxUpgradingReasonSucceeded, want: sandboxUpdating},
+		{name: "new identity with old failure", owner: "identity-ops", operation: "new", progress: "old", status: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed, want: sandboxUpdating},
+		{name: "new identity without progress", owner: "identity-ops", operation: "new", status: metav1.ConditionTrue, reason: agentsv1alpha1.SandboxUpgradingReasonSucceeded, want: sandboxUpdating},
+		{name: "accepted success", owner: "identity-ops", operation: "new", progress: "new", status: metav1.ConditionTrue, reason: agentsv1alpha1.SandboxUpgradingReasonSucceeded, want: sandboxUpdated},
+		{name: "accepted failure", owner: "identity-ops", operation: "new", progress: "new", status: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed, want: sandboxFailed},
+		{name: "unobserved target", owner: "identity-ops", operation: "new", progress: "new", unobserved: true, status: metav1.ConditionTrue, reason: agentsv1alpha1.SandboxUpgradingReasonSucceeded, want: sandboxUpdating},
+		{name: "same name old UID failed matching template", owner: "identity-ops", operation: "old", progress: "old", status: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed, want: sandboxCandidate},
+		{name: "deleted old owner failed matching template", operation: "old", progress: "old", status: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed, want: sandboxCandidate},
+		{name: "previous success matching template needs no update", operation: "old", progress: "old", status: metav1.ConditionTrue, reason: agentsv1alpha1.SandboxUpgradingReasonSucceeded, want: sandboxNoNeedUpdate},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := newSandboxUpdateOps("identity-ops", "default", agentsv1alpha1.SandboxUpdateOpsUpdating, false, nil)
+			ops.UID = "new"
+			ops.Spec.UpdateStrategy.Type = agentsv1alpha1.SandboxUpdateOpsStrategyInplaceUpdate
+			ops.Spec.Patch = mustMarshalPatch(corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "main", Image: "busybox:1.0"}},
+			}})
+			sbx := newSandbox("identity-box", "default", tt.owner, agentsv1alpha1.SandboxRunning, []metav1.Condition{{
+				Type: string(agentsv1alpha1.SandboxConditionUpgrading), Status: tt.status, Reason: tt.reason,
+			}})
+			sbx.Generation = 2
+			sbx.Status.ObservedGeneration = 2
+			if tt.unobserved {
+				sbx.Status.ObservedGeneration = 1
+			}
+			sbx.Annotations = map[string]string{agentsv1alpha1.AnnotationUpgradeOperation: tt.operation}
+			if tt.progress != "" {
+				sbx.Status.UpgradeProgress = &agentsv1alpha1.SandboxUpgradeProgress{OperationID: tt.progress}
+			}
+			original := sbx.DeepCopy()
+			r := newTestReconciler()
+			require.Equal(t, tt.want, r.classifySandbox(t.Context(), sbx, ops))
+			require.Equal(t, original, sbx)
+		})
+	}
 }
 
 func TestClassifySandbox_FailedReasons(t *testing.T) {
@@ -1205,6 +1279,204 @@ func TestClassifySandbox_StateFilterPausedOnly(t *testing.T) {
 			r := newTestReconciler()
 			result := r.classifySandbox(context.Background(), tt.sandbox, ops)
 			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+// TestClassifySandbox_InplaceUpdateUsesUpgradingCondition verifies that an
+// InplaceUpdate ops reads its outcome from the Upgrading condition, just like
+// the pod-replacement strategies, because the in-place update now runs through
+// the sandbox controller's upgrade lifecycle.
+func TestClassifySandbox_InplaceUpdateUsesUpgradingCondition(t *testing.T) {
+	opsName := "inplace-ops"
+	ops := &agentsv1alpha1.SandboxUpdateOps{
+		ObjectMeta: metav1.ObjectMeta{Name: opsName},
+		Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
+			UpdateStrategy: agentsv1alpha1.SandboxUpdateOpsStrategy{
+				Type: agentsv1alpha1.SandboxUpdateOpsStrategyInplaceUpdate,
+			},
+			Patch: mustMarshalPatch(corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "main", Image: "busybox:2.0"}},
+				},
+			}),
+		},
+	}
+	newLabeledSandbox := func(image string, conditions []metav1.Condition) *agentsv1alpha1.Sandbox {
+		return &agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+				agentsv1alpha1.LabelSandboxUpdateOps: opsName,
+			}},
+			Spec: agentsv1alpha1.SandboxSpec{
+				EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+					Template: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "main", Image: image}},
+						},
+					},
+				},
+			},
+			Status: agentsv1alpha1.SandboxStatus{
+				Phase:      agentsv1alpha1.SandboxRunning,
+				Conditions: conditions,
+			},
+		}
+	}
+	tests := []struct {
+		name     string
+		sandbox  *agentsv1alpha1.Sandbox
+		expected sandboxUpdateState
+	}{
+		{
+			name: "Upgrading=True/Succeeded -> updated",
+			sandbox: newLabeledSandbox("busybox:2.0", []metav1.Condition{{
+				Type:   string(agentsv1alpha1.SandboxConditionUpgrading),
+				Status: metav1.ConditionTrue,
+				Reason: agentsv1alpha1.SandboxUpgradingReasonSucceeded,
+			}}),
+			expected: sandboxUpdated,
+		},
+		{
+			name: "Upgrading=False/UpgradePodFailed -> failed",
+			sandbox: newLabeledSandbox("busybox:2.0", []metav1.Condition{{
+				Type:   string(agentsv1alpha1.SandboxConditionUpgrading),
+				Status: metav1.ConditionFalse,
+				Reason: agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed,
+			}}),
+			expected: sandboxFailed,
+		},
+		{
+			name: "Upgrading=False/PreUpgradeFailed -> failed",
+			sandbox: newLabeledSandbox("busybox:2.0", []metav1.Condition{{
+				Type:   string(agentsv1alpha1.SandboxConditionUpgrading),
+				Status: metav1.ConditionFalse,
+				Reason: agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed,
+			}}),
+			expected: sandboxFailed,
+		},
+		{
+			name: "Upgrading=False/UpgradePod in progress -> updating",
+			sandbox: newLabeledSandbox("busybox:2.0", []metav1.Condition{{
+				Type:   string(agentsv1alpha1.SandboxConditionUpgrading),
+				Status: metav1.ConditionFalse,
+				Reason: agentsv1alpha1.SandboxUpgradingReasonUpgradePod,
+			}}),
+			expected: sandboxUpdating,
+		},
+		{
+			// The InplaceUpdate condition alone no longer decides the outcome: the
+			// upgrade lifecycle reports through the Upgrading condition, so without
+			// it a Running sandbox whose template already matches needs no work.
+			name: "InplaceUpdate condition only, template matches -> no need update",
+			sandbox: newLabeledSandbox("busybox:2.0", []metav1.Condition{{
+				Type:   string(agentsv1alpha1.SandboxConditionInplaceUpdate),
+				Status: metav1.ConditionTrue,
+				Reason: agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded,
+			}}),
+			expected: sandboxNoNeedUpdate,
+		},
+		{
+			name:     "no condition, template differs -> updating",
+			sandbox:  newLabeledSandbox("busybox:1.0", nil),
+			expected: sandboxUpdating,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newTestReconciler()
+			result := r.classifySandbox(context.Background(), tt.sandbox, ops)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestClassifySandbox_InplaceUpdatePreValidation(t *testing.T) {
+	opsName := "inplace-ops"
+	newOps := func(patch corev1.PodTemplateSpec) *agentsv1alpha1.SandboxUpdateOps {
+		return &agentsv1alpha1.SandboxUpdateOps{
+			ObjectMeta: metav1.ObjectMeta{Name: opsName},
+			Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
+				UpdateStrategy: agentsv1alpha1.SandboxUpdateOpsStrategy{
+					Type: agentsv1alpha1.SandboxUpdateOpsStrategyInplaceUpdate,
+				},
+				Patch: mustMarshalPatch(patch),
+			},
+		}
+	}
+	// Sandbox without ops label; the hash annotation is computed from the
+	// current template, mirroring what the sandbox controller records.
+	newUnlabeledSandbox := func(withHashAnnotation bool) *agentsv1alpha1.Sandbox {
+		sbx := &agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{}},
+			Spec: agentsv1alpha1.SandboxSpec{
+				EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+					Template: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "main", Image: "busybox:1.0"}},
+						},
+					},
+				},
+			},
+			Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRunning},
+		}
+		if withHashAnnotation {
+			_, immutableHash := sandboxcore.HashSandbox(sbx)
+			sbx.Annotations = map[string]string{agentsv1alpha1.SandboxHashImmutablePart: immutableHash}
+		}
+		return sbx
+	}
+	tests := []struct {
+		name     string
+		patch    corev1.PodTemplateSpec
+		hashAnno bool
+		expected sandboxUpdateState
+	}{
+		{
+			name: "image-only patch keeps immutable part -> candidate",
+			patch: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "main", Image: "busybox:2.0"}},
+				},
+			},
+			hashAnno: true,
+			expected: sandboxCandidate,
+		},
+		{
+			name: "env patch changes immutable part -> failed",
+			patch: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "main", Env: []corev1.EnvVar{{Name: "FOO", Value: "bar"}}}},
+				},
+			},
+			hashAnno: true,
+			expected: sandboxFailed,
+		},
+		{
+			name: "env patch without hash annotation skips check -> candidate",
+			patch: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "main", Env: []corev1.EnvVar{{Name: "FOO", Value: "bar"}}}},
+				},
+			},
+			hashAnno: false,
+			expected: sandboxCandidate,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newTestReconciler()
+			ops := newOps(tt.patch)
+			sbx := newUnlabeledSandbox(tt.hashAnno)
+			result := r.classifySandbox(context.Background(), sbx, ops)
+			assert.Equal(t, tt.expected, result)
+			if tt.expected == sandboxFailed {
+				select {
+				case ev := <-r.Recorder.(*record.FakeRecorder).Events:
+					assert.Contains(t, ev, "ValidationFailed")
+				default:
+					t.Error("expected a ValidationFailed event to be recorded")
+				}
+			}
 		})
 	}
 }
@@ -1571,6 +1843,94 @@ func TestHandleDeletion_Success(t *testing.T) {
 	updatedOps := &agentsv1alpha1.SandboxUpdateOps{}
 	err = r.Get(context.Background(), types.NamespacedName{Name: "test-ops", Namespace: "default"}, updatedOps)
 	assert.True(t, errors.IsNotFound(err), "ops should be fully deleted after finalizer removal")
+}
+
+func TestHandleDeletion_OperationIdentity(t *testing.T) {
+	tests := []struct {
+		name, operation, progress         string
+		succeeded, keepOwner, clearPolicy bool
+		concurrentUpdate                  bool
+	}{
+		{name: "current operation still running", operation: "old", progress: "old"},
+		{name: "current operation succeeded", operation: "old", progress: "old", succeeded: true, clearPolicy: true},
+		{name: "old success not accepted by current operation", operation: "old", progress: "previous", succeeded: true},
+		{name: "old success without progress", operation: "old", succeeded: true},
+		{name: "same name new UID is untouched", operation: "new", progress: "new", succeeded: true, keepOwner: true},
+		{name: "new UID arrives after deletion list", operation: "old", progress: "old", succeeded: true, keepOwner: true, concurrentUpdate: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := newSandboxUpdateOps("deleting-ops", "default", agentsv1alpha1.SandboxUpdateOpsUpdating, false, nil)
+			ops.UID = "old"
+			ops.Finalizers = []string{finalizerName}
+			sbx := newSandbox("deleting-box", "default", ops.Name, agentsv1alpha1.SandboxUpgrading, nil)
+			sbx.Annotations = map[string]string{
+				agentsv1alpha1.AnnotationUpgradeOperation:     tt.operation,
+				agentsv1alpha1.AnnotationUpgradeResumeTrigger: agentsv1alpha1.True,
+			}
+			sbx.Spec.UpgradePolicy = &agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyInplaceUpdate}
+			if tt.progress != "" {
+				started := metav1.Now()
+				sbx.Status.UpgradeProgress = &agentsv1alpha1.SandboxUpgradeProgress{
+					OperationID: tt.progress, Revision: "target", SourcePodUID: "pod",
+					StartedAt: started, Deadline: metav1.NewTime(started.Add(300 * time.Second)),
+					PreUpgrade: "Succeeded", PostUpgrade: "Succeeded",
+				}
+			}
+			if tt.succeeded {
+				sbx.Status.Conditions = []metav1.Condition{{Type: string(agentsv1alpha1.SandboxConditionUpgrading),
+					Status: metav1.ConditionTrue, Reason: agentsv1alpha1.SandboxUpgradingReasonSucceeded}}
+			}
+			r := newTestReconciler(ops, sbx)
+			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), sbx))
+			original := sbx.DeepCopy()
+			wantOperation := tt.operation
+			if tt.concurrentUpdate {
+				r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+					Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+						if _, ok := obj.(*agentsv1alpha1.Sandbox); ok {
+							// List 已返回旧快照，此时写入新身份，验证删除 patch 的版本约束。
+							current := &agentsv1alpha1.Sandbox{}
+							require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(sbx), current))
+							current.Annotations[agentsv1alpha1.AnnotationUpgradeOperation] = "new"
+							current.Spec.UpgradePolicy.Type = agentsv1alpha1.SandboxUpgradePolicyRecreate
+							require.NoError(t, c.Update(ctx, current))
+							original = current.DeepCopy()
+						}
+						return c.Patch(ctx, obj, patch, opts...)
+					},
+				})
+			}
+			require.NoError(t, r.Delete(t.Context(), ops))
+			req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ops)}
+			if tt.concurrentUpdate {
+				_, err := r.Reconcile(t.Context(), req)
+				require.True(t, errors.IsConflict(err), "expected conflict, got %v", err)
+				retainedOps := &agentsv1alpha1.SandboxUpdateOps{}
+				require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(ops), retainedOps))
+				require.Contains(t, retainedOps.Finalizers, finalizerName)
+				wantOperation = "new"
+			}
+			_, err := r.Reconcile(t.Context(), req)
+			require.NoError(t, err)
+			stored := &agentsv1alpha1.Sandbox{}
+			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), stored))
+			require.Equal(t, wantOperation, stored.Annotations[agentsv1alpha1.AnnotationUpgradeOperation])
+			require.Equal(t, original.Status, stored.Status)
+			if tt.keepOwner {
+				require.Equal(t, original, stored)
+			} else {
+				require.NotContains(t, stored.Labels, agentsv1alpha1.LabelSandboxUpdateOps)
+				require.NotContains(t, stored.Annotations, agentsv1alpha1.AnnotationUpgradeResumeTrigger)
+				if tt.clearPolicy {
+					require.Nil(t, stored.Spec.UpgradePolicy)
+				} else {
+					require.Equal(t, original.Spec.UpgradePolicy, stored.Spec.UpgradePolicy)
+				}
+			}
+			require.True(t, errors.IsNotFound(r.Get(t.Context(), client.ObjectKeyFromObject(ops), &agentsv1alpha1.SandboxUpdateOps{})))
+		})
+	}
 }
 
 func TestHandleDeletion_NoFinalizer(t *testing.T) {
@@ -2317,7 +2677,17 @@ func TestSyncSandboxUpgradeState(t *testing.T) {
 		wantLabelGone  bool
 		wantPolicyNil  bool
 		wantPolicyKept bool
+		staleVersion   bool
 	}{
+		{
+			name:           "stale success cleanup cannot clear new operation policy",
+			sandbox:        newStateSandbox("sbx-stale", failedLabels, true),
+			state:          sandboxUpdated,
+			staleVersion:   true,
+			wantPatches:    1,
+			wantLabel:      true,
+			wantPolicyKept: true,
+		},
 		{
 			name:        "failed and no label -> add label",
 			sandbox:     newStateSandbox("sbx-1", opsLabels, false),
@@ -2410,12 +2780,24 @@ func TestSyncSandboxUpgradeState(t *testing.T) {
 				Build()
 			r := &Reconciler{Client: fakeClient, Scheme: testScheme, Recorder: record.NewFakeRecorder(10)}
 
+			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(tt.sandbox), tt.sandbox))
+			t.Cleanup(func() { ResourceVersionExpectations.Delete(tt.sandbox) })
+			var current *agentsv1alpha1.Sandbox
+			if tt.staleVersion {
+				current = tt.sandbox.DeepCopy()
+				current.Annotations = map[string]string{agentsv1alpha1.AnnotationUpgradeOperation: "new-operation"}
+				current.Spec.UpgradePolicy.Type = agentsv1alpha1.SandboxUpgradePolicyInplaceUpdate
+				require.NoError(t, r.Update(t.Context(), current))
+			}
 			r.syncSandboxUpgradeState(context.Background(), tt.sandbox, ops, tt.state)
 			assert.Equal(t, tt.wantPatches, sandboxPatches)
 
 			updated := &agentsv1alpha1.Sandbox{}
 			err := r.Get(context.Background(), types.NamespacedName{Name: tt.sandbox.Name, Namespace: tt.sandbox.Namespace}, updated)
 			assert.NoError(t, err)
+			if tt.staleVersion {
+				require.Equal(t, current, updated)
+			}
 			if tt.wantLabel {
 				assert.Equal(t, agentsv1alpha1.True, updated.Labels[agentsv1alpha1.LabelSandboxUpgradeFailed])
 			}
@@ -2488,6 +2870,7 @@ func TestReconcile_UpgradeFailedLabelRemovedOnRecovery(t *testing.T) {
 
 func TestReconcile_Phase2PatchForResumeSucceed(t *testing.T) {
 	ops := newSandboxUpdateOps("test-ops", "default", agentsv1alpha1.SandboxUpdateOpsUpdating, false, nil)
+	ops.UID = "phase-two-operation"
 	ops.Finalizers = []string{finalizerName}
 	ops.Spec.Patch = mustMarshalPatch(corev1.PodTemplateSpec{
 		Spec: corev1.PodSpec{
@@ -2496,24 +2879,46 @@ func TestReconcile_Phase2PatchForResumeSucceed(t *testing.T) {
 			},
 		},
 	})
-	// Sandbox in ResumeSucceed state: has ops label, Upgrading condition with
-	// ResumeSucceed reason, and the resume trigger annotation from phase 1.
-	sbx := newSandbox("sbx-1", "default", "test-ops", agentsv1alpha1.SandboxUpgrading, []metav1.Condition{
+	// 新 UID 已下发但旧轮次的恢复成功仍在，不能提前下发第二阶段模板。
+	sbx := newSandbox("phase-two-box", "default", "test-ops", agentsv1alpha1.SandboxUpgrading, []metav1.Condition{
 		{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Reason: agentsv1alpha1.SandboxUpgradingReasonResumeSucceed, Status: metav1.ConditionFalse},
 	})
 	sbx.Annotations = map[string]string{
 		agentsv1alpha1.AnnotationUpgradeResumeTrigger: agentsv1alpha1.True,
+		agentsv1alpha1.AnnotationUpgradeOperation:     string(ops.UID),
 	}
-
+	sbx.Generation = 2
+	sbx.Status.ObservedGeneration = 2
+	sbx.Status.UpgradeProgress = &agentsv1alpha1.SandboxUpgradeProgress{OperationID: "old"}
+	sbx.Spec.UpgradePolicy = &agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyRecreate}
 	r := newTestReconciler(ops, sbx)
-	_, err := r.Reconcile(context.Background(), ctrl.Request{
+	t.Cleanup(func() { ResourceVersionExpectations.Delete(sbx) })
+	_, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ops)})
+	require.NoError(t, err)
+	pending := &agentsv1alpha1.Sandbox{}
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), pending))
+	require.Equal(t, sbx.Spec, pending.Spec)
+	require.Equal(t, sbx.Annotations, pending.Annotations)
+	pendingOps := &agentsv1alpha1.SandboxUpdateOps{}
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(ops), pendingOps))
+	require.Equal(t, int32(1), pendingOps.Status.UpdatingReplicas)
+	require.Zero(t, pendingOps.Status.UpdatedReplicas)
+	require.Zero(t, pendingOps.Status.FailedReplicas)
+	// 模拟 Sandbox Controller 已接纳并完成本轮恢复，第二阶段现在才允许执行。
+	pending.Status.UpgradeProgress.OperationID = string(ops.UID)
+	require.NoError(t, r.Status().Update(t.Context(), pending))
+	_, err = r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "test-ops", Namespace: "default"},
 	})
 	assert.NoError(t, err)
 
-	// Verify phase 2 patch was applied: template updated, annotation removed
+	// 本轮恢复成功后下发模板，并保留操作身份和执行策略。
 	updatedSbx := &agentsv1alpha1.Sandbox{}
-	err = r.Get(context.Background(), types.NamespacedName{Name: "sbx-1", Namespace: "default"}, updatedSbx)
+	err = r.Get(t.Context(), client.ObjectKeyFromObject(sbx), updatedSbx)
+	require.NoError(t, err)
+	require.Equal(t, string(ops.UID), updatedSbx.Annotations[agentsv1alpha1.AnnotationUpgradeOperation])
+	require.Equal(t, pending.Status.UpgradeProgress, updatedSbx.Status.UpgradeProgress)
+	require.Equal(t, pending.Spec.UpgradePolicy, updatedSbx.Spec.UpgradePolicy)
 	assert.NoError(t, err)
 	assert.Equal(t, "busybox:2.0", updatedSbx.Spec.Template.Spec.Containers[0].Image,
 		"phase 2 should patch the template")

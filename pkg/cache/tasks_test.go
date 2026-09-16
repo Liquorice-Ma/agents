@@ -222,6 +222,51 @@ func TestNewSandboxWaitReadyTask_UnsupportedResize_ReturnsReadyWhenSandboxUsable
 	assert.NoError(t, task.Wait(100*time.Millisecond))
 }
 
+func TestNewSandboxWaitReadyTask_InplaceGeneration(t *testing.T) {
+	for _, tt := range []struct {
+		name            string
+		generation      int64
+		conditionStatus metav1.ConditionStatus
+		reason          string
+		upgrade         bool
+		wantError       string
+	}{
+		{name: "current failed despite healthy pod", generation: 2, conditionStatus: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed, wantError: "in-place update failed: QoS rejected"},
+		{name: "previous failed waits for current observation", generation: 1, conditionStatus: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed, wantError: "object is not satisfied"},
+		{name: "previous success is not deliverable", generation: 1, conditionStatus: metav1.ConditionTrue, reason: agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded, wantError: "object is not satisfied"},
+		{name: "current update still waiting", generation: 2, conditionStatus: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating, wantError: "object is not satisfied"},
+		{name: "current success is deliverable", generation: 2, conditionStatus: metav1.ConditionTrue, reason: agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded},
+		{name: "explicit upgrade ignores old claim failure", generation: 1, conditionStatus: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed, upgrade: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			// 旧 Pod 健康不代表当前 Claim 目标已经更新成功。
+			sbx := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "claim-generation", Generation: 2},
+				Status: agentsv1alpha1.SandboxStatus{
+					ObservedGeneration: 2, Phase: agentsv1alpha1.SandboxRunning,
+					PodInfo: agentsv1alpha1.PodInfo{PodIP: "10.0.0.1"},
+					Conditions: []metav1.Condition{
+						{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: agentsv1alpha1.SandboxReadyReasonPodReady},
+						{Type: string(agentsv1alpha1.SandboxConditionInplaceUpdate), Status: tt.conditionStatus, Reason: tt.reason, Message: "QoS rejected", ObservedGeneration: tt.generation},
+					},
+				},
+			}
+			if tt.upgrade {
+				sbx.Spec.UpgradePolicy = &agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyInplaceUpdate}
+			}
+			c, _, err := cachetest.NewTestCache(t, sbx)
+			require.NoError(t, err)
+			task := c.NewSandboxWaitReadyTask(t.Context(), sbx)
+			err = task.Wait(100 * time.Millisecond)
+			if tt.wantError != "" {
+				require.ErrorContains(t, err, tt.wantError)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
 func TestNewCheckpointTask_Succeeded(t *testing.T) {
 	cp := &agentsv1alpha1.Checkpoint{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "cp-1"},

@@ -2835,7 +2835,7 @@ func TestCommonControl_performRecreateUpgrade_PodTerminating(t *testing.T) {
 		podControl:           podCtrl,
 		checkpointControl:    checkpointCtrl,
 		initializer:          initializer,
-		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(10), NewLifecycleHookFunc(nil), initializer, defaultCommonSyncStatusFromPod, nil),
+		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(10), NewLifecycleHookFunc(nil), initializer, defaultCommonSyncStatusFromPod, nil, nil),
 	}
 
 	newStatus := &agentsv1alpha1.SandboxStatus{
@@ -2896,7 +2896,7 @@ func TestCommonControl_performRecreateUpgrade_NewPodNotReady(t *testing.T) {
 		podControl:           podCtrl,
 		checkpointControl:    checkpointCtrl,
 		initializer:          initializer,
-		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(10), NewLifecycleHookFunc(nil), initializer, defaultCommonSyncStatusFromPod, nil),
+		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(10), NewLifecycleHookFunc(nil), initializer, defaultCommonSyncStatusFromPod, nil, nil),
 	}
 
 	newStatus := &agentsv1alpha1.SandboxStatus{
@@ -3141,7 +3141,7 @@ func TestCommonControl_performRecreateUpgrade_PodReadyFalse(t *testing.T) {
 		podControl:           podCtrl,
 		checkpointControl:    checkpointCtrl,
 		initializer:          initializer,
-		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(10), NewLifecycleHookFunc(nil), initializer, defaultCommonSyncStatusFromPod, nil),
+		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(10), NewLifecycleHookFunc(nil), initializer, defaultCommonSyncStatusFromPod, nil, nil),
 	}
 
 	newStatus := &agentsv1alpha1.SandboxStatus{
@@ -3520,7 +3520,10 @@ func TestCommonControl_performRecreateUpgrade_InitializerPath(t *testing.T) {
 	_ = clientgoscheme.AddToScheme(scheme)
 	_ = agentsv1alpha1.AddToScheme(scheme)
 
-	// readyPod returns a pod that matches the target revision and has PodReady=True.
+	// readyPod returns a pod that matches the target revision, has its
+	// container running, and PodReady=True. performRecreateUpgrade gates on
+	// podContainersRunning before initialization, so the container spec and a
+	// Running container status are required to reach the initializer path.
 	readyPod := func() *corev1.Pod {
 		return &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
@@ -3536,9 +3539,13 @@ func TestCommonControl_performRecreateUpgrade_InitializerPath(t *testing.T) {
 				Conditions: []corev1.PodCondition{
 					{Type: corev1.PodReady, Status: corev1.ConditionTrue},
 				},
+				ContainerStatuses: []corev1.ContainerStatus{
+					{Name: "test", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+				},
 			},
 			Spec: corev1.PodSpec{
-				NodeName: "node-1",
+				NodeName:   "node-1",
+				Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
 			},
 		}
 	}
@@ -3594,7 +3601,7 @@ func TestCommonControl_performRecreateUpgrade_InitializerPath(t *testing.T) {
 				podControl:           podCtrl,
 				checkpointControl:    checkpointCtrl,
 				initializer:          initializer,
-				upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(10), NewLifecycleHookFunc(nil), initializer, defaultCommonSyncStatusFromPod, nil),
+				upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(10), NewLifecycleHookFunc(nil), initializer, defaultCommonSyncStatusFromPod, nil, nil),
 			}
 
 			newStatus := &agentsv1alpha1.SandboxStatus{

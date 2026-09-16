@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	sandboxcore "github.com/openkruise/agents/pkg/controller/sandbox/core"
 )
 
 // sanitizeTemplatePatch strips explicit nulls for fields a pod template can
@@ -70,6 +71,26 @@ func sanitizeTemplatePatch(raw []byte) []byte {
 	return sanitized
 }
 
+// mergeTemplateWithPatch applies the ops patch (Strategic Merge Patch) to the
+// sandbox's current template and returns the merged result. Raw JSON bytes are
+// used directly to preserve $patch directives (e.g. "$patch": "delete") that
+// would be lost if unmarshalled into a typed Go struct first.
+func mergeTemplateWithPatch(sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps) (*v1.PodTemplateSpec, error) {
+	originalBytes, err := json.Marshal(sbx.Spec.Template)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal original template: %w", err)
+	}
+	mergedBytes, err := strategicpatch.StrategicMergePatch(originalBytes, sanitizeTemplatePatch(ops.Spec.Patch.Raw), &v1.PodTemplateSpec{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to apply strategic merge patch: %w", err)
+	}
+	merged := &v1.PodTemplateSpec{}
+	if err := json.Unmarshal(mergedBytes, merged); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal merged template: %w", err)
+	}
+	return merged, nil
+}
+
 // isSandboxTemplateMatchPatch checks whether the sandbox template already matches
 // the patch target. If applying the SMP produces no change, the sandbox is already
 // up-to-date and should be skipped entirely (no patch, no counting).
@@ -77,17 +98,9 @@ func isSandboxTemplateMatchPatch(sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha
 	if sbx.Spec.Template == nil || len(ops.Spec.Patch.Raw) == 0 {
 		return false
 	}
-	originalBytes, err := json.Marshal(sbx.Spec.Template)
-	if err != nil {
-		return false
-	}
-	mergedBytes, err := strategicpatch.StrategicMergePatch(originalBytes, sanitizeTemplatePatch(ops.Spec.Patch.Raw), &v1.PodTemplateSpec{})
+	merged, err := mergeTemplateWithPatch(sbx, ops)
 	if err != nil {
 		klog.ErrorS(err, "Failed to apply strategic merge patch for match check", "sandbox", klog.KObj(sbx))
-		return false
-	}
-	merged := &v1.PodTemplateSpec{}
-	if err := json.Unmarshal(mergedBytes, merged); err != nil {
 		return false
 	}
 	return reflect.DeepEqual(sbx.Spec.Template, merged)
@@ -121,7 +134,7 @@ func mergeTemplate(modified *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.Sandbox
 // logs the operation, and records a resource-version expectation. The tag
 // is appended to log messages to distinguish phase 2 from normal upgrades.
 func (r *Reconciler) patchAndExpect(ctx context.Context, sbx, modified *agentsv1alpha1.Sandbox, tag string) error {
-	patch := client.MergeFrom(sbx)
+	patch := client.MergeFromWithOptions(sbx, client.MergeFromWithOptimisticLock{})
 	patchData, patchErr := patch.Data(modified)
 	if patchErr != nil {
 		klog.ErrorS(patchErr, "Failed to compute patch data"+tag, "sandbox", klog.KObj(sbx))
@@ -137,17 +150,64 @@ func (r *Reconciler) patchAndExpect(ctx context.Context, sbx, modified *agentsv1
 	return nil
 }
 
+// validateInplaceUpdateFeasible checks, before patching, whether applying the ops
+// patch to the sandbox template keeps the hash-immutable-part unchanged, i.e. the
+// patch only modifies container images, resources, and template metadata. It
+// mirrors the sandbox controller's own check (annotation vs. new template hash) so
+// an infeasible patch is caught before the sandbox is ever patched. Returns a
+// non-empty message describing the violation.
+func validateInplaceUpdateFeasible(sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps) string {
+	// Without an inline template or a patch, nothing can change the immutable part.
+	if sbx.Spec.Template == nil || len(ops.Spec.Patch.Raw) == 0 {
+		return ""
+	}
+	// No hash annotation means the sandbox controller has not recorded a baseline
+	// yet; skip the check, consistent with the controller's own short-circuit.
+	annotationHash := sbx.Annotations[agentsv1alpha1.SandboxHashImmutablePart]
+	if annotationHash == "" {
+		return ""
+	}
+	merged, err := mergeTemplateWithPatch(sbx, ops)
+	if err != nil {
+		return err.Error()
+	}
+	mergedBox := sbx.DeepCopy()
+	mergedBox.Spec.Template = merged
+	if _, immutableHash := sandboxcore.HashSandbox(mergedBox); immutableHash != annotationHash {
+		return "patch modifies fields other than container images, resources, and metadata, which the in-place update path does not support"
+	}
+	return ""
+}
+
 func (r *Reconciler) applySandboxPatch(ctx context.Context, sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps) error {
 	modified := sbx.DeepCopy()
 
 	// Set UpgradePolicy based on strategy type
-	policyType := agentsv1alpha1.SandboxUpgradePolicyRecreate
-	if ops.Spec.UpdateStrategy.Type == agentsv1alpha1.SandboxUpdateOpsStrategyCheckpointRestore {
-		policyType = agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore
+	switch ops.Spec.UpdateStrategy.Type {
+	case agentsv1alpha1.SandboxUpdateOpsStrategyInplaceUpdate:
+		// InplaceUpdate keeps the pod but still runs the upgrade lifecycle, so the
+		// sandbox needs an explicit policy. Leaving the policy unset would instead
+		// select the SandboxClaim in-place path, which stays in Running and is not
+		// observable as an upgrade.
+		modified.Spec.UpgradePolicy = &agentsv1alpha1.SandboxUpgradePolicy{
+			Type: agentsv1alpha1.SandboxUpgradePolicyInplaceUpdate,
+		}
+	case agentsv1alpha1.SandboxUpdateOpsStrategyCheckpointRestore:
+		modified.Spec.UpgradePolicy = &agentsv1alpha1.SandboxUpgradePolicy{
+			Type: agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore,
+		}
+	default:
+		modified.Spec.UpgradePolicy = &agentsv1alpha1.SandboxUpgradePolicy{
+			Type: agentsv1alpha1.SandboxUpgradePolicyRecreate,
+		}
 	}
-	modified.Spec.UpgradePolicy = &agentsv1alpha1.SandboxUpgradePolicy{
-		Type: policyType,
+
+	// 新 SUO 的 UID 与目标配置原子下发，确保旧失败和 hook 记录不会被新操作继承。
+	modified.Spec.UpgradePolicy.TimeoutSeconds = ops.Spec.UpdateStrategy.TimeoutSeconds
+	if modified.Annotations == nil {
+		modified.Annotations = map[string]string{}
 	}
+	modified.Annotations[agentsv1alpha1.AnnotationUpgradeOperation] = string(ops.UID)
 
 	// Set Lifecycle
 	if ops.Spec.Lifecycle != nil {
@@ -175,7 +235,8 @@ func (r *Reconciler) applySandboxPatch(ctx context.Context, sbx *agentsv1alpha1.
 		return r.patchAndExpect(ctx, sbx, modified, " (resume trigger)")
 	}
 
-	// Normal upgrade (Running): apply template patch.
+	// 非 Paused 状态直接下发目标，旧恢复触发不能阻挡新 SUO 的补救。
+	delete(modified.Annotations, agentsv1alpha1.AnnotationUpgradeResumeTrigger)
 	if err := mergeTemplate(modified, ops); err != nil {
 		return err
 	}

@@ -79,14 +79,19 @@ const (
 	// checkpointing the pod, deleting it, and restoring from the checkpoint.
 	// This preserves the writable layer of containers whose image is unchanged.
 	SandboxUpdateOpsStrategyCheckpointRestore SandboxUpdateOpsStrategyType = "CheckpointRestore"
+
+	// SandboxUpdateOpsStrategyInplaceUpdate means sandboxes will be updated in place
+	// without recreating the pod. Only container images, resources, and pod template
+	// metadata (labels/annotations) may be changed by the patch.
+	SandboxUpdateOpsStrategyInplaceUpdate SandboxUpdateOpsStrategyType = "InplaceUpdate"
 )
 
 // SandboxUpdateOpsStrategy defines the strategy for batch sandbox updates.
 type SandboxUpdateOpsStrategy struct {
 	// Type specifies the update strategy type.
 	// When empty, defaults to Recreate.
-	// Supported values: Recreate, CheckpointRestore.
-	// +kubebuilder:validation:Enum=Recreate;CheckpointRestore
+	// Supported values: Recreate, CheckpointRestore, InplaceUpdate.
+	// +kubebuilder:validation:Enum=Recreate;CheckpointRestore;InplaceUpdate
 	// +optional
 	Type SandboxUpdateOpsStrategyType `json:"type,omitempty"`
 
@@ -94,6 +99,12 @@ type SandboxUpdateOpsStrategy struct {
 	// Value can be an absolute number (e.g., 5) or a percentage of total sandboxes (e.g., 10%).
 	// +optional
 	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
+
+	// 每个 Sandbox 从生命周期开始到最终 Ready 的预算（秒），未指定时为 300 秒。
+	// 不包含批次排队；新补救 SUO 执行时重新计时。
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	TimeoutSeconds *int32 `json:"timeoutSeconds,omitempty"`
 }
 
 // SandboxUpdateOpsPhase represents the phase of a SandboxUpdateOps.

@@ -212,14 +212,22 @@ spec:
                       MaxUnavailable is the maximum number of sandboxes that can be upgrading at the same time.
                       Value can be an absolute number (e.g., 5) or a percentage of total sandboxes (e.g., 10%).
                     x-kubernetes-int-or-string: true
+                  timeoutSeconds:
+                    description: |-
+                      每个 Sandbox 从生命周期开始到最终 Ready 的预算（秒），未指定时为 300 秒。
+                      不包含批次排队；新补救 SUO 执行时重新计时。
+                    format: int32
+                    minimum: 1
+                    type: integer
                   type:
                     description: |-
                       Type specifies the update strategy type.
                       When empty, defaults to Recreate.
-                      Supported values: Recreate, CheckpointRestore.
+                      Supported values: Recreate, CheckpointRestore, InplaceUpdate.
                     enum:
                     - Recreate
                     - CheckpointRestore
+                    - InplaceUpdate
                     type: string
                 type: object
             required:

@@ -107,7 +107,7 @@ func NewCommonControl(args SandboxControlArgs) SandboxControl {
 			defaultSyncStatusFromPod(pod, newStatus, syncReadyCondition, classifyStartupFailure)
 		},
 	}
-	control.upgradeControl = NewUpgradeControl(args.Client, args.CheckpointControl, args.PodControl, args.Recorder, lifecycleHookFunc, initializer, control.syncStatusFromPod, control.handleResume)
+	control.upgradeControl = NewUpgradeControl(args.Client, args.CheckpointControl, args.PodControl, args.Recorder, lifecycleHookFunc, initializer, control.syncStatusFromPod, control.handleResume, control.inplaceUpdateControl)
 	return control
 }
 
@@ -176,22 +176,18 @@ func (r *commonControl) EnsureSandboxUpdated(ctx context.Context, args EnsureFun
 		}
 	}
 
-	// For upgrade policies that do not require pod replacement (e.g.,
-	// sandbox-manager triggered inplace update via annotation), perform
-	// inplace update directly without entering the full upgrade lifecycle
-	// (PreUpgrade -> UpgradePod -> PostUpgrade). Recreate and CheckpointRestore
-	// are excluded here because they require the full lifecycle.
-	if !RequiresPodReplacementUpgrade(box) {
-		done, err := r.handleInplaceUpdateSandbox(ctx, args)
-		if err != nil {
-			return err
-		}
-		if !done {
-			// In-place update still in progress: early-return so that
-			// syncStatusFromPod does not overwrite the transient
-			// Ready=False/InplaceUpdate conditions set during the update.
-			return nil
-		}
+	// Sandboxes without an upgrade policy apply template changes in place
+	// directly from the Running phase, without entering the upgrade lifecycle
+	// (PreUpgrade -> UpgradePod -> PostUpgrade). This is the SandboxClaim
+	// delivery path: the sandbox must stay Running so the claim can be served.
+	// Every explicit upgrade policy — including InplaceUpdate — is excluded here
+	// because it runs through the Upgrading phase instead.
+	if !RequiresUpgradeSandbox(box) {
+		_, err := r.handleInplaceUpdateSandbox(ctx, args)
+		// done 同时包含成功与终止失败，不能据此覆盖 adapter 设置的 Ready。
+		// args.Pod 可能是 patch 前对象，此处只同步状态信息，Pod watch 会触发后续观察。
+		r.syncStatusFromPod(pod, newStatus, false)
+		return err
 	}
 	// Ensure probe configurations are valid and take effect on the pod.
 	if err := r.probeManager.EnsureProbe(ctx, box, pod, newStatus); err != nil {
@@ -409,4 +405,152 @@ func (r *commonControl) handleInplaceUpdateSandbox(ctx context.Context, args Ens
 		recorder: r.recorder,
 	}
 	return handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+}
+
+// CommonInPlaceUpdateHandler implements the inplace update handler for common controller
+type CommonInPlaceUpdateHandler struct {
+	control  *inplaceupdate.InPlaceUpdateControl
+	recorder record.EventRecorder
+}
+
+func (h *CommonInPlaceUpdateHandler) GetInPlaceUpdateControl() *inplaceupdate.InPlaceUpdateControl {
+	return h.control
+}
+
+func (h *CommonInPlaceUpdateHandler) GetRecorder() record.EventRecorder {
+	return h.recorder
+}
+
+// Claim adapter 保留阶段事实并负责最终 Ready。done=true 也可能表示终止失败。
+// Pod 写入和最终状态写入仍通过 write-tracking client 记录 tracing。
+func handleInPlaceUpdateCommon(ctx context.Context, handler InPlaceUpdateHandler, pod *corev1.Pod,
+	box *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus,
+) (done bool, err error) {
+	previous := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
+	if previous != nil && isTerminalInplaceUpdateReason(previous.Reason) &&
+		previous.ObservedGeneration == box.Generation && box.Status.UpdateRevision == newStatus.UpdateRevision {
+		// 保留终态但继续反映健康变化；只有可重新确认的无副作用前置拒绝允许 Ready=True。
+		_, validationErr := validateInplaceUpdate(pod, box)
+		ready := validationErr != nil && classifyInplaceError(validationErr) != inplaceClassStateCorrupted && podIsReady(pod)
+		setUpdateReady(newStatus, ready, agentsv1alpha1.SandboxReadyReasonInplaceUpdating, previous.Message)
+		return true, nil
+	}
+	result, stepErr := runInplaceUpdateStep(ctx, handler.GetInPlaceUpdateControl(), pod, box, newStatus.UpdateRevision)
+	ready := podIsReady(pod)
+	msg := inplaceWaitMessage(pod)
+	reason := agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating
+	status := metav1.ConditionFalse
+	if stepErr != nil {
+		msg = utils.TruncateConditionMessage(stepErr.Error())
+		// 前置拒绝不推断健康；执行失败和损坏状态均关闭 Ready 门禁。
+		if result == inplaceUpdateStepPatchDelivered || classifyInplaceError(stepErr) == inplaceClassStateCorrupted || !isTerminalInplaceError(stepErr) {
+			ready = false
+		}
+		if isTerminalInplaceError(stepErr) {
+			reason = agentsv1alpha1.SandboxInplaceUpdateReasonFailed
+			// resize 不被支持是独立终态，映射到 UnsupportedResize 便于上层区分处置。
+			if isUnsupportedResizeError(stepErr) {
+				reason = agentsv1alpha1.SandboxInplaceUpdateReasonUnsupportedResize
+			}
+			done = true
+			if previous == nil || previous.Reason != reason || previous.Message != msg || previous.ObservedGeneration != box.Generation {
+				if recorder := handler.GetRecorder(); recorder != nil {
+					recorder.Event(box, corev1.EventTypeWarning, "InplaceUpdateFailed", msg)
+				}
+			}
+		} else {
+			err = stepErr
+		}
+	} else if result == inplaceUpdateStepSucceeded && ready {
+		reason, status, msg, done = agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded, metav1.ConditionTrue, "", true
+	} else if result == inplaceUpdateStepSucceeded {
+		msg = "configuration applied; waiting for Pod Ready: " + msg
+	}
+	// 内存缩容会被 resize 路径的宽松比较静默跳过，镜像升级照常进行；这里对首次
+	// 观测到该 generation 的推进补一个建议事件，提醒用户目标内存并未真正下调。
+	if stepErr == nil && (result == inplaceUpdateStepPatchDelivered || result == inplaceUpdateStepSucceeded) &&
+		(previous == nil || previous.ObservedGeneration != box.Generation) {
+		if downscaleErr := inplaceupdate.CheckMemoryDownscale(box, pod); downscaleErr != nil {
+			if recorder := handler.GetRecorder(); recorder != nil {
+				recorder.Event(box, corev1.EventTypeWarning, "MemoryDownscaleSkipped", downscaleErr.Error())
+			}
+		}
+	}
+	// SetSandboxCondition 更新已有 Condition 时不会刷新 ObservedGeneration，
+	// 这里直接同步指针，确保跨轮 Claim 消费方和事件去重按当前 generation 判断。
+	if previous != nil {
+		previous.ObservedGeneration = box.Generation
+	}
+	utils.SetSandboxCondition(newStatus, metav1.Condition{
+		Type: string(agentsv1alpha1.SandboxConditionInplaceUpdate), Status: status,
+		Reason: reason, Message: utils.TruncateConditionMessage(msg), ObservedGeneration: box.Generation, LastTransitionTime: metav1.Now(),
+	})
+	setUpdateReady(newStatus, ready, agentsv1alpha1.SandboxReadyReasonInplaceUpdating, msg)
+	return done, err
+}
+
+func podIsReady(pod *corev1.Pod) bool {
+	if pod == nil || !pod.DeletionTimestamp.IsZero() {
+		return false
+	}
+	cond := utils.GetPodCondition(&pod.Status, corev1.PodReady)
+	return cond != nil && cond.Status == corev1.ConditionTrue
+}
+
+func setUpdateReady(status *agentsv1alpha1.SandboxStatus, ready bool, reason, msg string) {
+	value := metav1.ConditionFalse
+	if ready {
+		value, reason, msg = metav1.ConditionTrue, agentsv1alpha1.SandboxReadyReasonPodReady, ""
+	}
+	utils.SetSandboxCondition(status, metav1.Condition{Type: string(agentsv1alpha1.SandboxConditionReady),
+		Status: value, Reason: reason, Message: utils.TruncateConditionMessage(msg), LastTransitionTime: metav1.Now()})
+}
+
+func inplaceWaitMessage(pod *corev1.Pod) string {
+	if pod == nil {
+		return "waiting for Pod"
+	}
+	if msg := describeInplaceWaitReason(pod); msg != "" {
+		return utils.TruncateConditionMessage(msg)
+	}
+	for _, cond := range pod.Status.Conditions {
+		if (cond.Type == corev1.PodResizePending || cond.Type == corev1.PodResizeInProgress) && cond.Status == corev1.ConditionTrue {
+			return utils.TruncateConditionMessage(fmt.Sprintf("waiting for resource resize: %s: %s", cond.Reason, cond.Message))
+		}
+	}
+	return "waiting for target configuration and Pod readiness"
+}
+
+// setClaimInplaceUpdateFailed records a terminal in-place update failure on
+// the InplaceUpdate condition.
+func setClaimInplaceUpdateFailed(newStatus *agentsv1alpha1.SandboxStatus, msg string) {
+	utils.SetSandboxCondition(newStatus, metav1.Condition{
+		Type:               string(agentsv1alpha1.SandboxConditionInplaceUpdate),
+		Status:             metav1.ConditionFalse,
+		Reason:             agentsv1alpha1.SandboxInplaceUpdateReasonFailed,
+		Message:            msg,
+		LastTransitionTime: metav1.Now(),
+	})
+}
+
+// isTerminalInplaceUpdateReason 判断 InplaceUpdate Condition 的原因是否代表
+// 不应被重新评估或覆盖的终态失败。
+func isTerminalInplaceUpdateReason(reason string) bool {
+	return reason == agentsv1alpha1.SandboxInplaceUpdateReasonFailed ||
+		reason == agentsv1alpha1.SandboxInplaceUpdateReasonUnsupportedResize
+}
+
+// isInplaceUpdateTerminal returns true if the InplaceUpdate condition has already
+// reached a terminal state that should not be re-evaluated.
+func isInplaceUpdateTerminal(newStatus *agentsv1alpha1.SandboxStatus) bool {
+	cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
+	if cond == nil {
+		return false
+	}
+	switch cond.Reason {
+	case agentsv1alpha1.SandboxInplaceUpdateReasonFailed,
+		agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded:
+		return true
+	}
+	return false
 }
