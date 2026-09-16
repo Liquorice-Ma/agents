@@ -669,6 +669,11 @@ const (
 	SandboxUpgradingReasonPostUpgradeFailed = "PostUpgradeFailed"
 	SandboxUpgradingReasonSucceeded         = "Succeeded"
 
+	// SandboxUpgradeProgress.PreUpgrade/PostUpgrade 的取值，与字段上的
+	// +kubebuilder:validation:Enum=Running;Succeeded 保持一致。
+	SandboxUpgradeHookRunning   = "Running"
+	SandboxUpgradeHookSucceeded = "Succeeded"
+
 	// SandboxConditionPaused Reason
 	SandboxPausedReasonPending      = "Pending"
 	SandboxPausedReasonImageChanged = "ImageChanged"

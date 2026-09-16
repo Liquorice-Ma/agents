@@ -210,7 +210,7 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 	}
 	// 已完成 hook 且本次观察到 Ready 时优先收敛成功；否则到期后不再执行新副作用。
 	if !time.Now().Before(progress.Deadline.Time) &&
-		!(upgradeCond.Reason == agentsv1alpha1.SandboxUpgradingReasonPostUpgrade && progress.PostUpgrade == "Succeeded" && podIsReady(pod)) {
+		!(upgradeCond.Reason == agentsv1alpha1.SandboxUpgradingReasonPostUpgrade && progress.PostUpgrade == agentsv1alpha1.SandboxUpgradeHookSucceeded && podIsReady(pod)) {
 		failReason := agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed
 		switch upgradeCond.Reason {
 		case agentsv1alpha1.SandboxUpgradingReasonPreUpgrade:
@@ -419,20 +419,20 @@ func (r *UpgradeControl) runUpgradeHook(ctx context.Context, args EnsureFuncArgs
 	if pre {
 		mark = &progress.PreUpgrade
 	}
-	if *mark == "Succeeded" {
+	if *mark == agentsv1alpha1.SandboxUpgradeHookSucceeded {
 		return upgradeActionResult{Succeeded: true}, nil
 	}
-	if *mark == "Running" {
+	if *mark == agentsv1alpha1.SandboxUpgradeHookRunning {
 		return upgradeActionResult{Message: "previous hook execution result is unknown; automatic replay stopped"}, nil
 	}
 	if !hasUpgradeAction(args.Box, pre) {
-		*mark = "Succeeded"
+		*mark = agentsv1alpha1.SandboxUpgradeHookSucceeded
 		return upgradeActionResult{Succeeded: true}, nil
 	}
 	if err := ctx.Err(); err != nil {
 		return upgradeActionResult{}, err
 	}
-	*mark = "Running"
+	*mark = agentsv1alpha1.SandboxUpgradeHookRunning
 	if err := r.persistUpgradeProgress(ctx, args); err != nil {
 		*mark = ""
 		return upgradeActionResult{}, fmt.Errorf("cannot persist hook execution intent: %w", err)
@@ -445,10 +445,10 @@ func (r *UpgradeControl) runUpgradeHook(ctx context.Context, args EnsureFuncArgs
 	boxForHook.Status = *args.NewStatus.DeepCopy()
 	result := r.executeUpgradeAction(ctx, args.Pod, boxForHook, action)
 	if result.Succeeded {
-		*mark = "Succeeded"
+		*mark = agentsv1alpha1.SandboxUpgradeHookSucceeded
 		// 成功事实先单独落盘，后续 checkpoint 或初始化失败不能导致重跑已成功 hook。
 		if err := r.persistUpgradeProgress(ctx, args); err != nil {
-			*mark = "Running"
+			*mark = agentsv1alpha1.SandboxUpgradeHookRunning
 			return upgradeActionResult{}, fmt.Errorf("cannot persist hook success: %w", err)
 		}
 	}

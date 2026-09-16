@@ -521,18 +521,6 @@ func inplaceWaitMessage(pod *corev1.Pod) string {
 	return "waiting for target configuration and Pod readiness"
 }
 
-// setClaimInplaceUpdateFailed records a terminal in-place update failure on
-// the InplaceUpdate condition.
-func setClaimInplaceUpdateFailed(newStatus *agentsv1alpha1.SandboxStatus, msg string) {
-	utils.SetSandboxCondition(newStatus, metav1.Condition{
-		Type:               string(agentsv1alpha1.SandboxConditionInplaceUpdate),
-		Status:             metav1.ConditionFalse,
-		Reason:             agentsv1alpha1.SandboxInplaceUpdateReasonFailed,
-		Message:            msg,
-		LastTransitionTime: metav1.Now(),
-	})
-}
-
 // isTerminalInplaceUpdateReason 判断 InplaceUpdate Condition 的原因是否代表
 // 不应被重新评估或覆盖的终态失败。
 func isTerminalInplaceUpdateReason(reason string) bool {

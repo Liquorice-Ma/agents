@@ -129,7 +129,11 @@ func (c *Cache) NewSandboxWaitReadyTask(ctx context.Context, sbx *agentsv1alpha1
 			if inplaceCond.Status == metav1.ConditionFalse && inplaceCond.Reason == agentsv1alpha1.SandboxInplaceUpdateReasonFailed {
 				return false, fmt.Errorf("sandbox in-place update failed: %s", inplaceCond.Message)
 			}
-			if inplaceCond.Status != metav1.ConditionTrue || inplaceCond.Reason != agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded {
+			// 集群不支持 resize 是终态，控制器不会再重试，继续等待只会超时。
+			// 沙箱本身仍可服务，所以放行给下面的运行状态检查；目标规格未生效
+			// 由 InplaceUpdate=False/UnsupportedResize 和 Warning 事件告知调用方。
+			if inplaceCond.Reason != agentsv1alpha1.SandboxInplaceUpdateReasonUnsupportedResize &&
+				(inplaceCond.Status != metav1.ConditionTrue || inplaceCond.Reason != agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded) {
 				return false, nil
 			}
 		}
