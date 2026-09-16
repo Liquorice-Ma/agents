@@ -447,10 +447,14 @@ var _ = Describe("InplaceUpdate Claim Path (SandboxClaim delivery)", func() {
 			cond := getInplaceUpdateCondition(sbx)
 			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 
-			By("Verifying Ready condition is False (not delivered)")
+			By("Verifying Ready condition stays True (old container keeps serving)")
+			// 坏镜像拉不下来时 kubelet 保留旧容器继续运行，Pod 仍然健康；
+			// 按 delivery 语义（写入成功但未生效、Pod 健康）Ready 保持 True，
+			// 目标未生效由 InplaceUpdate=False/InplaceUpdating 单独表达。
 			readyCond := getReadyCondition(sbx)
 			Expect(readyCond).NotTo(BeNil())
-			Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(readyCond.Reason).To(Equal(agentsv1alpha1.SandboxReadyReasonPodReady))
 		})
 	})
 
