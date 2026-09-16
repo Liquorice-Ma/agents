@@ -685,7 +685,7 @@ func TestEnsureSandboxUpgraded(t *testing.T) {
 			expectErr:    false,
 			expectPhase:  agentsv1alpha1.SandboxRunning,
 			expectCondition: map[string]metav1.ConditionStatus{
-				string(agentsv1alpha1.SandboxConditionReady): metav1.ConditionTrue,
+				string(agentsv1alpha1.SandboxConditionReady): metav1.ConditionFalse,
 			},
 		},
 		{
@@ -714,7 +714,7 @@ func TestEnsureSandboxUpgraded(t *testing.T) {
 			expectPhase:  agentsv1alpha1.SandboxUpgrading,
 			expectCondition: map[string]metav1.ConditionStatus{
 				string(agentsv1alpha1.SandboxConditionUpgrading): metav1.ConditionFalse,
-				string(agentsv1alpha1.SandboxConditionReady):     metav1.ConditionTrue,
+				string(agentsv1alpha1.SandboxConditionReady):     metav1.ConditionFalse,
 			},
 		},
 	}
@@ -778,6 +778,103 @@ func TestEnsureSandboxUpgraded(t *testing.T) {
 				require.Equal(t, tt.expectHookCalls, *tt.hookCalls, "actual hook call count does not match expectation")
 			}
 		})
+	}
+
+	for _, strategy := range []agentsv1alpha1.SandboxUpgradePolicyType{
+		agentsv1alpha1.SandboxUpgradePolicyRecreate,
+		agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore,
+		agentsv1alpha1.SandboxUpgradePolicyInplaceUpdate,
+	} {
+		for _, hook := range []struct {
+			name   string
+			reason string
+			pre    bool
+		}{
+			{name: "PreUpgrade", reason: agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed, pre: true},
+			{name: "PostUpgrade", reason: agentsv1alpha1.SandboxUpgradingReasonPostUpgradeFailed},
+		} {
+			t.Run(fmt.Sprintf("%s/%s retries and completes", strategy, hook.name), func(t *testing.T) {
+				pod := newRunningPod()
+				pod.Labels[agentsv1alpha1.PodLabelTemplateHash] = "target"
+				// 已进入 PostUpgrade 后不再新增公共 PodReady 门槛。
+				if !hook.pre {
+					pod.Status.Conditions[0].Status = corev1.ConditionFalse
+				}
+				box := newUpgradeTestSandbox(&agentsv1alpha1.SandboxLifecycle{}, &agentsv1alpha1.SandboxUpgradePolicy{Type: strategy})
+				box.UID = "hook-retry-box"
+				box.Generation = 2
+				box.Spec.Template.Spec = *pod.Spec.DeepCopy()
+				_, immutableHash := HashSandbox(box)
+				box.Annotations[agentsv1alpha1.SandboxHashImmutablePart] = immutableHash
+				if hook.pre {
+					box.Spec.Lifecycle.PreUpgrade = preUpgradeHook
+				} else {
+					box.Spec.Lifecycle.PostUpgrade = postUpgradeHook
+				}
+				status := &agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxUpgrading, UpdateRevision: "target",
+					Conditions: []metav1.Condition{{
+						Type: string(agentsv1alpha1.SandboxConditionUpgrading), Status: metav1.ConditionFalse,
+						Reason: hook.reason, ObservedGeneration: 1,
+					}},
+				}
+				cp := newUpgradeCheckpoint("hook-checkpoint", box, agentsv1alpha1.CheckpointSucceeded)
+				control := newTestCommonControlWithCheckpointIndex(nil, pod.DeepCopy(), cp)
+				control.upgradeControl.initializer = &mockSandboxInitializer{}
+				control.upgradeControl.inplaceUpdateControl = control.inplaceUpdateControl
+				calls := 0
+				control.upgradeControl.lifecycleHookFunc = func(context.Context, *agentsv1alpha1.Sandbox, *agentsv1alpha1.UpgradeAction) (int32, string, string, error) {
+					calls++
+					// hook 成功之前不能清理 Checkpoint。
+					require.NoError(t, control.Get(t.Context(), client.ObjectKeyFromObject(cp), &agentsv1alpha1.Checkpoint{}))
+					if calls <= 2 {
+						return 1, "", "still failing", nil
+					}
+					return 0, "ok", "", nil
+				}
+				args := EnsureFuncArgs{Pod: pod, Box: box, NewStatus: status}
+				prepareUpgradeStepTest(t, control.Client, args)
+				events := control.upgradeControl.recorder.(*record.FakeRecorder).Events
+				for attempt := 1; attempt <= 3; attempt++ {
+					box.Status = *status.DeepCopy()
+					require.NoError(t, control.EnsureSandboxUpgraded(t.Context(), args))
+					require.Equal(t, attempt, calls)
+					cond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionUpgrading))
+					require.NotNil(t, cond)
+					require.EqualValues(t, 1, cond.ObservedGeneration)
+					if attempt <= 2 {
+						require.Equal(t, hook.reason, cond.Reason)
+						require.Equal(t, "hook failed with exit code 1, stderr: still failing, stdout: ", cond.Message)
+						require.Equal(t, agentsv1alpha1.SandboxUpgrading, status.Phase)
+						require.Equal(t, metav1.ConditionFalse, utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionReady)).Status)
+						select {
+						case event := <-events:
+							require.Equal(t, fmt.Sprintf("Warning %s %s failed: %s", hook.reason, hook.name, cond.Message), event)
+						default:
+							t.Fatal("每次 hook 失败均应报告原有事件")
+						}
+						require.Empty(t, events)
+						continue
+					}
+					require.Equal(t, agentsv1alpha1.SandboxUpgradingReasonSucceeded, cond.Reason)
+					require.Empty(t, cond.Message)
+					require.Equal(t, agentsv1alpha1.SandboxRunning, status.Phase)
+					require.Equal(t, metav1.ConditionTrue, utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionReady)).Status)
+					var recorded []string
+					for len(events) > 0 {
+						recorded = append(recorded, <-events)
+					}
+					require.Contains(t, recorded, "Normal UpgradeSucceeded Upgrade completed successfully")
+				}
+				err := control.Get(t.Context(), client.ObjectKeyFromObject(cp), &agentsv1alpha1.Checkpoint{})
+				if strategy == agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore {
+					require.True(t, apierrors.IsNotFound(err), "成功收尾应清理 Checkpoint: %v", err)
+				} else {
+					require.NoError(t, err)
+				}
+				ScaleExpectation.DeleteExpectations(GetControllerKey(box))
+			})
+		}
 	}
 }
 
@@ -870,11 +967,10 @@ func TestEnsureInplaceUpgrade(t *testing.T) {
 			},
 			mockHookFunc: mockLifecycleHookFunc(0, "", "", nil),
 			expectErr:    false,
-			// During a normal wait, Ready follows the Pod, but Upgrading must not
-			// succeed early.
+			// 升级期间保留共享 Ready=False，配置尚未生效不能提前成功。
 			expectPhase: agentsv1alpha1.SandboxUpgrading,
 			expectCondition: map[string]metav1.ConditionStatus{
-				string(agentsv1alpha1.SandboxConditionReady):     metav1.ConditionTrue,
+				string(agentsv1alpha1.SandboxConditionReady):     metav1.ConditionFalse,
 				string(agentsv1alpha1.SandboxConditionUpgrading): metav1.ConditionFalse,
 			},
 		},
@@ -891,6 +987,7 @@ func TestEnsureInplaceUpgrade(t *testing.T) {
 			// No lifecycle → skip preUpgrade → UpgradePod → performRecreateUpgrade creates pod → stays Upgrading
 			expectPhase: agentsv1alpha1.SandboxUpgrading,
 			expectCondition: map[string]metav1.ConditionStatus{
+				string(agentsv1alpha1.RuntimeInitialized):        metav1.ConditionFalse,
 				string(agentsv1alpha1.SandboxConditionUpgrading): metav1.ConditionFalse,
 				string(agentsv1alpha1.SandboxConditionReady):     metav1.ConditionFalse,
 			},
@@ -916,6 +1013,7 @@ func TestEnsureInplaceUpgrade(t *testing.T) {
 			// performRecreateUpgrade creates pod when pod=nil → stays Upgrading
 			expectPhase: agentsv1alpha1.SandboxUpgrading,
 			expectCondition: map[string]metav1.ConditionStatus{
+				string(agentsv1alpha1.RuntimeInitialized):        metav1.ConditionFalse,
 				string(agentsv1alpha1.SandboxConditionUpgrading): metav1.ConditionFalse,
 				string(agentsv1alpha1.SandboxConditionReady):     metav1.ConditionFalse,
 			},
@@ -1057,6 +1155,10 @@ func TestExecuteUpgradePodStep_Branches(t *testing.T) {
 		expectReason  string
 		expectPhase   agentsv1alpha1.SandboxPhase
 		expectMsgPart string
+		initStatus    metav1.ConditionStatus
+		initErr       error
+		initCalls     int
+		getErr        error
 	}{
 		{
 			// Hash-immutable-part mismatch fails the UpgradePod step terminally
@@ -1112,8 +1214,7 @@ func TestExecuteUpgradePodStep_Branches(t *testing.T) {
 			expectReason: agentsv1alpha1.SandboxUpgradingReasonUpgradePod,
 		},
 		{
-			// A corrupted in-place state annotation cannot self-heal; the step
-			// fails terminally so the user can switch to Recreate.
+			// 损坏记录由原地步骤报告失败；当前 SUO 的策略类型不可切换。
 			name:          "inplace corrupted state fails terminally",
 			box:           newInplaceBox(),
 			pod:           newTargetRevisionPod(`{corrupted`),
@@ -1133,6 +1234,45 @@ func TestExecuteUpgradePodStep_Branches(t *testing.T) {
 			expectErr:    false,
 			expectPhase:  agentsv1alpha1.SandboxRunning,
 			expectReason: agentsv1alpha1.SandboxUpgradingReasonSucceeded,
+		},
+		{
+			name: "inplace applied but not ready waits before initialization and post hook",
+			box:  newInplaceBox(),
+			pod: func() *corev1.Pod {
+				p := newTargetRevisionPod("")
+				p.Status.Conditions[0].Status = corev1.ConditionFalse
+				return p
+			}(),
+			initStatus:   metav1.ConditionFalse,
+			expectReason: agentsv1alpha1.SandboxUpgradingReasonUpgradePod,
+		},
+		{
+			name: "inplace resumed pod initializes before post hook",
+			box:  newInplaceBox(), pod: newTargetRevisionPod(""),
+			initStatus: metav1.ConditionFalse, initCalls: 1,
+			expectPhase:  agentsv1alpha1.SandboxRunning,
+			expectReason: agentsv1alpha1.SandboxUpgradingReasonSucceeded,
+		},
+		{
+			name: "inplace initialized pod is not initialized again",
+			box:  newInplaceBox(), pod: newTargetRevisionPod(""),
+			initStatus:   metav1.ConditionTrue,
+			expectPhase:  agentsv1alpha1.SandboxRunning,
+			expectReason: agentsv1alpha1.SandboxUpgradingReasonSucceeded,
+		},
+		{
+			name: "inplace initialization error is propagated",
+			box:  newInplaceBox(), pod: newTargetRevisionPod(""),
+			initStatus: metav1.ConditionFalse, initCalls: 1,
+			initErr: fmt.Errorf("runtime init failed"), expectErr: true,
+			expectReason: agentsv1alpha1.SandboxUpgradingReasonUpgradePod,
+		},
+		{
+			name: "recreate read error is propagated without inplace classification",
+			box:  newUpgradeTestSandbox(nil, nil), pod: newTargetRevisionPod(""),
+			getErr:    apierrors.NewForbidden(corev1.Resource("pods"), "test-sandbox", fmt.Errorf("read denied")),
+			initCalls: 1, expectErr: true,
+			expectReason: agentsv1alpha1.SandboxUpgradingReasonUpgradePod,
 		},
 		{
 			// An infeasible resize reported by the kubelet is terminal for this
@@ -1206,15 +1346,54 @@ func TestExecuteUpgradePodStep_Branches(t *testing.T) {
 				objects = append(objects, tt.pod.DeepCopy())
 			}
 			ctrl := newTestUpgradeControlForInplace(objects...)
+			initializer := &mockSandboxInitializer{err: tt.initErr}
+			ctrl.initializer = initializer
+			postCalls := 0
+			tt.box.Spec.Lifecycle = &agentsv1alpha1.SandboxLifecycle{PostUpgrade: &agentsv1alpha1.UpgradeAction{
+				Exec: &corev1.ExecAction{Command: []string{"post"}},
+			}}
+			ctrl.lifecycleHookFunc = func(context.Context, *agentsv1alpha1.Sandbox, *agentsv1alpha1.UpgradeAction) (int32, string, string, error) {
+				postCalls++
+				require.Equal(t, tt.initCalls, initializer.called, "初始化必须先于 PostUpgrade")
+				return 0, "", "", nil
+			}
+			if tt.getErr != nil {
+				ctrl.Client = interceptor.NewClient(ctrl.Client.(client.WithWatch), interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if _, ok := obj.(*corev1.Pod); ok {
+						return tt.getErr
+					}
+					return c.Get(ctx, key, obj, opts...)
+				}})
+			}
 			if tt.nilControl {
 				ctrl.inplaceUpdateControl = nil
 			}
 			newStatus := upgradingPodStatus()
+			if tt.initStatus != "" {
+				utils.SetSandboxCondition(newStatus, metav1.Condition{Type: string(agentsv1alpha1.RuntimeInitialized), Status: tt.initStatus, Reason: agentsv1alpha1.SandboxConditionRuntimeInitReasonPending})
+			}
 			args := EnsureFuncArgs{Pod: tt.pod, Box: tt.box, NewStatus: newStatus}
 			prepareUpgradeStepTest(t, ctrl.Client, args)
 			err := ctrl.EnsureSandboxUpgraded(context.TODO(), args)
 			if (err != nil) != tt.expectErr {
 				t.Fatalf("EnsureSandboxUpgraded() error = %v, wantErr %v", err, tt.expectErr)
+			}
+			if tt.initErr != nil {
+				require.ErrorIs(t, err, tt.initErr)
+			}
+			if tt.getErr != nil {
+				require.ErrorIs(t, err, tt.getErr)
+			}
+			require.Equal(t, tt.initCalls, initializer.called)
+			ready := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReady))
+			require.NotNil(t, ready)
+			if tt.expectPhase == agentsv1alpha1.SandboxRunning {
+				require.Equal(t, 1, postCalls)
+				require.Equal(t, metav1.ConditionTrue, ready.Status)
+			} else {
+				require.Zero(t, postCalls)
+				require.Equal(t, metav1.ConditionFalse, ready.Status)
+				require.Equal(t, agentsv1alpha1.SandboxReadyReasonUpgrading, ready.Reason)
 			}
 			if tt.expectPhase != "" && newStatus.Phase != tt.expectPhase {
 				t.Errorf("phase = %q, want %q", newStatus.Phase, tt.expectPhase)
@@ -1313,7 +1492,7 @@ func TestInplaceUpgradeRollbackWhileStuck(t *testing.T) {
 	args := EnsureFuncArgs{Pod: &patched, Box: box, NewStatus: newStatus}
 	require.NoError(t, ctrl.EnsureSandboxUpgraded(t.Context(), args))
 	c = utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
-	require.Equal(t, agentsv1alpha1.SandboxUpgradingReasonPostUpgrade, c.Reason)
+	require.Equal(t, agentsv1alpha1.SandboxUpgradingReasonUpgradePod, c.Reason)
 	require.Equal(t, metav1.ConditionFalse, c.Status)
 	patched.Status.Conditions[0].Status = corev1.ConditionTrue
 	require.NoError(t, ctrl.EnsureSandboxUpgraded(t.Context(), args))
@@ -1680,7 +1859,7 @@ func TestPerformRecreateUpgrade_ContainerStatuses(t *testing.T) {
 		expectCondition map[string]metav1.ConditionStatus
 	}{
 		{
-			name: "pod crash loop waits within deadline",
+			name: "pod crash loop reports UpgradePodFailed",
 			pod: func() *corev1.Pod {
 				p := newRunningPod()
 				p.Labels[agentsv1alpha1.PodLabelTemplateHash] = "new-revision"
@@ -1715,13 +1894,13 @@ func TestPerformRecreateUpgrade_ContainerStatuses(t *testing.T) {
 			mockHookFunc: mockLifecycleHookFunc(0, "", "", nil),
 			expectErr:    false,
 			expectPhase:  agentsv1alpha1.SandboxUpgrading,
-			expectReason: agentsv1alpha1.SandboxUpgradingReasonUpgradePod,
+			expectReason: agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed,
 			expectCondition: map[string]metav1.ConditionStatus{
 				string(agentsv1alpha1.SandboxConditionUpgrading): metav1.ConditionFalse,
 			},
 		},
 		{
-			name: "terminated container waits for restart within deadline",
+			name: "terminated container reports UpgradePodFailed",
 			pod: func() *corev1.Pod {
 				p := newRunningPod()
 				p.Labels[agentsv1alpha1.PodLabelTemplateHash] = "new-revision"
@@ -1757,7 +1936,7 @@ func TestPerformRecreateUpgrade_ContainerStatuses(t *testing.T) {
 			mockHookFunc: mockLifecycleHookFunc(0, "", "", nil),
 			expectErr:    false,
 			expectPhase:  agentsv1alpha1.SandboxUpgrading,
-			expectReason: agentsv1alpha1.SandboxUpgradingReasonUpgradePod,
+			expectReason: agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed,
 			expectCondition: map[string]metav1.ConditionStatus{
 				string(agentsv1alpha1.SandboxConditionUpgrading): metav1.ConditionFalse,
 			},
@@ -1893,6 +2072,26 @@ func TestPerformRecreateUpgrade_ContainerStatuses(t *testing.T) {
 					t.Errorf("Expected condition %q status %q, got %q", condType, expectedStatus, cond.Status)
 				}
 			}
+			events := control.upgradeControl.recorder.(*record.FakeRecorder).Events
+			if tt.expectReason == agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed {
+				var message, eventMessage string
+				state := tt.pod.Status.ContainerStatuses[0].State
+				if state.Waiting != nil {
+					message = "container sandbox: CrashLoopBackOff - container is in crash loop"
+					eventMessage = "Container sandbox waiting: CrashLoopBackOff - container is in crash loop"
+				} else {
+					message = "container sandbox: terminated with exit code 1 - Error"
+					eventMessage = "Container sandbox terminated with exit code 1 - Error"
+				}
+				require.Equal(t, message, utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading)).Message)
+				select {
+				case event := <-events:
+					require.Equal(t, "Warning UpgradePodFailed "+eventMessage, event)
+				default:
+					t.Fatal("重建启动失败必须产生 UpgradePodFailed 事件")
+				}
+			}
+			require.Empty(t, events)
 		})
 	}
 }

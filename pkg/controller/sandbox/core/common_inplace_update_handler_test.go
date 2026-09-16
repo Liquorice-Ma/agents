@@ -25,6 +25,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -1388,7 +1389,7 @@ func TestHandleInPlaceUpdateCommon_StateNotNilNotCompletedTerminalErr(t *testing
 	require.Empty(t, newStatus.Conditions)
 	stored := &corev1.Pod{}
 	require.NoError(t, fakeClient.Get(ctx, client.ObjectKeyFromObject(pod), stored))
-	require.Equal(t, pod.Spec, stored.Spec)
+	require.True(t, apiequality.Semantic.DeepEqual(pod.Spec, stored.Spec), "Claim 不应修改 Pod spec；资源数量按语义比较")
 	require.Equal(t, pod.Annotations, stored.Annotations)
 	require.Equal(t, pod.Labels, stored.Labels)
 	oldState, stateErr := inplaceupdate.GetPodInPlaceUpdateState(pod)
@@ -1844,6 +1845,9 @@ func TestInplaceStepAndClaimState(t *testing.T) {
 		claimReason            string
 	}{
 		{name: "untracked", kind: "untracked", step: inplaceUpdateStepInProgress, class: inplaceClassUntrackedPod, hasError: true, terminal: true, claimDone: true},
+		{name: "init image change", kind: "init-image", step: inplaceUpdateStepInProgress, class: inplaceClassUnsupportedChange, hasError: true, terminal: true, claimDone: true, claimReason: agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded},
+		{name: "init resource change", kind: "init-resource", step: inplaceUpdateStepInProgress, class: inplaceClassUnsupportedChange, hasError: true, terminal: true, claimDone: true, claimReason: agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded},
+		{name: "injected init container unchanged", kind: "init-injected", step: inplaceUpdateStepSucceeded, claimDone: true, claimReason: agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded},
 		{name: "unsupported", kind: "unsupported", step: inplaceUpdateStepInProgress, class: inplaceClassUnsupportedChange, hasError: true, terminal: true, claimDone: true},
 		{name: "corrupted matching revision", kind: "corrupted", step: inplaceUpdateStepInProgress, class: inplaceClassStateCorrupted, hasError: true, terminal: true, claimDone: true, claimReason: agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded},
 		{name: "corrupted old revision", kind: "corrupted-old", step: inplaceUpdateStepInProgress, class: inplaceClassStateCorrupted, hasError: true, terminal: true, claimError: true},
@@ -1875,6 +1879,19 @@ func TestInplaceStepAndClaimState(t *testing.T) {
 				box := buildMatchingHashBox("matrix-box", "default", *pod.Spec.DeepCopy())
 				box.Generation = 3
 				switch tt.kind {
+				case "init-image", "init-resource", "init-injected":
+					pod.Spec.InitContainers = []corev1.Container{{Name: "init", Image: "busybox:1"}}
+					box = buildMatchingHashBox("matrix-box", "default", *pod.Spec.DeepCopy())
+					box.Generation = 3
+					if tt.kind == "init-image" {
+						box.Spec.Template.Spec.InitContainers[0].Image = "busybox:2"
+					}
+					if tt.kind == "init-resource" {
+						box.Spec.Template.Spec.InitContainers[0].Resources.Requests = corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")}
+					}
+					if tt.kind == "init-injected" {
+						pod.Spec.InitContainers = append(pod.Spec.InitContainers, corev1.Container{Name: "injected", Image: "busybox:1"})
+					}
 				case "untracked":
 					delete(pod.Labels, agentsv1alpha1.PodLabelTemplateHash)
 				case "unsupported":

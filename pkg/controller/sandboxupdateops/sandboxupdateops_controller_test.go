@@ -1328,9 +1328,9 @@ func TestClassifySandbox_InplaceUpdateUsesUpgradingCondition(t *testing.T) {
 			expected: sandboxNoNeedUpdate,
 		},
 		{
-			name:     "no condition, template differs -> updating",
+			name:     "no condition, running template differs -> phase two fallback",
 			sandbox:  newLabeledSandbox("busybox:1.0", nil),
-			expected: sandboxUpdating,
+			expected: sandboxResumeSucceed,
 		},
 	}
 	for _, tt := range tests {
@@ -2713,50 +2713,64 @@ func TestReconcile_UpgradeFailedLabelRemovedOnRecovery(t *testing.T) {
 }
 
 func TestReconcile_Phase2PatchForResumeSucceed(t *testing.T) {
-	ops := newSandboxUpdateOps("test-ops", "default", agentsv1alpha1.SandboxUpdateOpsUpdating, false, nil)
-	ops.Finalizers = []string{finalizerName}
-	ops.Spec.Patch = mustMarshalPatch(corev1.PodTemplateSpec{
-		Spec: corev1.PodSpec{
-			Containers: []corev1.Container{
-				{Name: "main", Image: "busybox:2.0"},
-			},
-		},
-	})
-	// A Sandbox that has resumed successfully with the old template
-	// (ResumeSucceed) can deliver the phase-two template within a single reconcile.
-	sbx := newSandbox("phase-two-box", "default", "test-ops", agentsv1alpha1.SandboxUpgrading, []metav1.Condition{
-		{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Reason: agentsv1alpha1.SandboxUpgradingReasonResumeSucceed, Status: metav1.ConditionFalse},
-	})
-	sbx.Annotations = map[string]string{
-		agentsv1alpha1.AnnotationUpgradeResumeTrigger: agentsv1alpha1.True,
+	for _, strategy := range []agentsv1alpha1.SandboxUpdateOpsStrategyType{
+		agentsv1alpha1.SandboxUpdateOpsStrategyRecreate,
+		agentsv1alpha1.SandboxUpdateOpsStrategyInplaceUpdate,
+	} {
+		for _, runningFallback := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/runningFallback=%t", strategy, runningFallback), func(t *testing.T) {
+				ops := newSandboxUpdateOps("test-ops", "default", agentsv1alpha1.SandboxUpdateOpsUpdating, false, nil)
+				ops.Finalizers = []string{finalizerName}
+				ops.Spec.Patch = mustMarshalPatch(corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: "main", Image: "busybox:2.0"},
+						},
+					},
+				})
+				// A Sandbox that has resumed successfully with the old template
+				// (ResumeSucceed) can deliver the phase-two template within a single reconcile.
+				sbx := newSandbox("phase-two-box", "default", "test-ops", agentsv1alpha1.SandboxUpgrading, []metav1.Condition{
+					{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Reason: agentsv1alpha1.SandboxUpgradingReasonResumeSucceed, Status: metav1.ConditionFalse},
+				})
+				sbx.Annotations = map[string]string{
+					agentsv1alpha1.AnnotationUpgradeResumeTrigger: agentsv1alpha1.True,
+				}
+				sbx.Generation = 2
+				sbx.Status.ObservedGeneration = 2
+				ops.Spec.UpdateStrategy.Type = strategy
+				sbx.Spec.UpgradePolicy = &agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyType(strategy)}
+				if runningFallback {
+					sbx.Status.Phase = agentsv1alpha1.SandboxRunning
+					sbx.Status.Conditions = nil
+				}
+				r := newTestReconciler(ops, sbx)
+				t.Cleanup(func() { ResourceVersionExpectations.Delete(sbx) })
+
+				_, err := r.Reconcile(context.Background(), ctrl.Request{
+					NamespacedName: types.NamespacedName{Name: "test-ops", Namespace: "default"},
+				})
+				assert.NoError(t, err)
+
+				// Phase two patches the template and removes the resume trigger annotation,
+				// while keeping the upgrade policy for the Sandbox Controller to drive the
+				// actual upgrade.
+				updatedSbx := &agentsv1alpha1.Sandbox{}
+				require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), updatedSbx))
+				assert.Equal(t, "busybox:2.0", updatedSbx.Spec.Template.Spec.Containers[0].Image,
+					"phase 2 should patch the template")
+				_, exists := updatedSbx.Annotations[agentsv1alpha1.AnnotationUpgradeResumeTrigger]
+				assert.False(t, exists, "resume trigger annotation should be removed in phase 2")
+				require.Equal(t, sbx.Spec.UpgradePolicy, updatedSbx.Spec.UpgradePolicy)
+
+				// resumeSucceed counts toward updating.
+				updatedOps := &agentsv1alpha1.SandboxUpdateOps{}
+				require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: "test-ops", Namespace: "default"}, updatedOps))
+				assert.Equal(t, int32(1), updatedOps.Status.UpdatingReplicas,
+					"resumeSucceed sandbox should count as updating")
+			})
+		}
 	}
-	sbx.Generation = 2
-	sbx.Status.ObservedGeneration = 2
-	sbx.Spec.UpgradePolicy = &agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyRecreate}
-	r := newTestReconciler(ops, sbx)
-	t.Cleanup(func() { ResourceVersionExpectations.Delete(sbx) })
-
-	_, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "test-ops", Namespace: "default"},
-	})
-	assert.NoError(t, err)
-
-	// Phase two patches the template and removes the resume trigger annotation,
-	// while keeping the upgrade policy for the Sandbox Controller to drive the
-	// actual upgrade.
-	updatedSbx := &agentsv1alpha1.Sandbox{}
-	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), updatedSbx))
-	assert.Equal(t, "busybox:2.0", updatedSbx.Spec.Template.Spec.Containers[0].Image,
-		"phase 2 should patch the template")
-	_, exists := updatedSbx.Annotations[agentsv1alpha1.AnnotationUpgradeResumeTrigger]
-	assert.False(t, exists, "resume trigger annotation should be removed in phase 2")
-	require.Equal(t, sbx.Spec.UpgradePolicy, updatedSbx.Spec.UpgradePolicy)
-
-	// resumeSucceed counts toward updating.
-	updatedOps := &agentsv1alpha1.SandboxUpdateOps{}
-	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: "test-ops", Namespace: "default"}, updatedOps))
-	assert.Equal(t, int32(1), updatedOps.Status.UpdatingReplicas,
-		"resumeSucceed sandbox should count as updating")
 }
 
 func TestReconcile_Phase2PatchPausedOpsSkipsPhase2(t *testing.T) {

@@ -232,10 +232,14 @@ func TestNewSandboxWaitReadyTask_InplaceGeneration(t *testing.T) {
 		reason          string
 		upgrade         bool
 		staleStatus     bool
+		noPodIP         bool
+		notRunning      bool
 		wantError       string
 	}{
 		{name: "current failed with healthy pod is usable", generation: 2, conditionStatus: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed},
 		{name: "previous failed with healthy pod is usable", generation: 1, conditionStatus: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed},
+		{name: "failed without pod IP still waits", generation: 2, conditionStatus: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed, noPodIP: true, wantError: "object is not satisfied"},
+		{name: "failed while not running still waits", generation: 2, conditionStatus: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed, notRunning: true, wantError: "object is not satisfied"},
 		{name: "previous success is deliverable", generation: 1, conditionStatus: metav1.ConditionTrue, reason: agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded},
 		{name: "current update still waiting", generation: 2, conditionStatus: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating, wantError: "object is not satisfied"},
 		{name: "current success is deliverable", generation: 2, conditionStatus: metav1.ConditionTrue, reason: agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded},
@@ -262,6 +266,12 @@ func TestNewSandboxWaitReadyTask_InplaceGeneration(t *testing.T) {
 			}
 			if tt.staleStatus {
 				sbx.Status.ObservedGeneration--
+			}
+			if tt.noPodIP {
+				sbx.Status.PodInfo.PodIP = ""
+			}
+			if tt.notRunning {
+				sbx.Status.Phase = agentsv1alpha1.SandboxPending
 			}
 			if tt.upgrade {
 				sbx.Spec.UpgradePolicy = &agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyInplaceUpdate}

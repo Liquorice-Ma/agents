@@ -201,7 +201,7 @@ func TestApplySandboxPatch_CheckpointRestoreSetsCheckpointRestorePolicy(t *testi
 	assert.Equal(t, agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore, updated.Spec.UpgradePolicy.Type)
 }
 
-func TestValidateInplaceUpdateFeasible_EmptyInputReturnsEmpty(t *testing.T) {
+func TestValidateInplaceUpdateFeasible(t *testing.T) {
 	ops := &agentsv1alpha1.SandboxUpdateOps{
 		Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
 			Patch: runtime.RawExtension{Raw: []byte(`{"spec":{"containers":[{"name":"main","image":"v2"}]}}`)},
@@ -225,6 +225,32 @@ func TestValidateInplaceUpdateFeasible_EmptyInputReturnsEmpty(t *testing.T) {
 		},
 	}
 	assert.Empty(t, validateInplaceUpdateFeasible(sbx, &agentsv1alpha1.SandboxUpdateOps{}))
+	for _, tt := range []struct {
+		name, patch  string
+		wantRejected bool
+	}{
+		{name: "unchanged init container", patch: `{"spec":{"initContainers":[{"name":"init","image":"busybox:1"}]}}`},
+		{name: "init image", patch: `{"spec":{"initContainers":[{"name":"init","image":"busybox:2"}]}}`, wantRejected: true},
+		{name: "init resources", patch: `{"spec":{"initContainers":[{"name":"init","resources":{"requests":{"cpu":"100m"}}}]}}`, wantRejected: true},
+		{name: "init deletion directive", patch: `{"spec":{"initContainers":[{"name":"init","$patch":"delete"}]}}`, wantRejected: true},
+		{name: "regular image", patch: `{"spec":{"containers":[{"name":"main","image":"busybox:2"}]}}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			box := sbx.DeepCopy()
+			box.Spec.Template.Spec.Containers = []corev1.Container{{Name: "main", Image: "busybox:1"}}
+			box.Spec.Template.Spec.InitContainers = []corev1.Container{{Name: "init", Image: "busybox:1"}}
+			original := box.DeepCopy()
+			patchOps := &agentsv1alpha1.SandboxUpdateOps{Spec: agentsv1alpha1.SandboxUpdateOpsSpec{Patch: runtime.RawExtension{Raw: []byte(tt.patch)}}}
+			message := validateInplaceUpdateFeasible(box, patchOps)
+			if tt.wantRejected {
+				require.Contains(t, message, "init container changes")
+			} else {
+				require.Empty(t, message)
+			}
+			require.Equal(t, original, box)
+			require.Equal(t, tt.patch, string(patchOps.Spec.Patch.Raw))
+		})
+	}
 }
 
 func TestApplySandboxPatch_CopiesLifecycle(t *testing.T) {
