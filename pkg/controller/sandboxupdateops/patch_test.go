@@ -24,7 +24,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -200,130 +199,6 @@ func TestApplySandboxPatch_CheckpointRestoreSetsCheckpointRestorePolicy(t *testi
 	assert.NoError(t, err)
 	require.NotNil(t, updated.Spec.UpgradePolicy)
 	assert.Equal(t, agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore, updated.Spec.UpgradePolicy.Type)
-}
-
-func TestApplySandboxPatch_NewOperation(t *testing.T) {
-	for _, strategy := range []agentsv1alpha1.SandboxUpdateOpsStrategyType{
-		agentsv1alpha1.SandboxUpdateOpsStrategyInplaceUpdate,
-		agentsv1alpha1.SandboxUpdateOpsStrategyRecreate,
-	} {
-		for _, paused := range []bool{false, true} {
-			timeout := int32(47)
-			for _, config := range []struct {
-				withLifecycle bool
-				timeout       *int32
-			}{{false, nil}, {true, nil}, {false, &timeout}, {true, &timeout}} {
-				t.Run(fmt.Sprintf("%s/paused=%t/lifecycle=%t/defaultTimeout=%t", strategy, paused, config.withLifecycle, config.timeout == nil), func(t *testing.T) {
-					ops := newSandboxUpdateOps("new-ops", "default", agentsv1alpha1.SandboxUpdateOpsUpdating, false, nil)
-					ops.UID = "new-operation"
-					ops.Spec.UpdateStrategy.Type = strategy
-					ops.Spec.UpdateStrategy.TimeoutSeconds = config.timeout
-					ops.Spec.Patch = mustMarshalPatch(corev1.PodTemplateSpec{Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{Name: "main", Image: "busybox:2.0"}},
-					}})
-					if config.withLifecycle {
-						ops.Spec.Lifecycle = &agentsv1alpha1.SandboxLifecycle{PostUpgrade: &agentsv1alpha1.UpgradeAction{
-							Exec: &corev1.ExecAction{Command: []string{"new-hook"}},
-						}}
-					}
-					sbx := newSandbox("operation-patch", "default", "old-ops", agentsv1alpha1.SandboxUpgrading, nil)
-					if paused {
-						sbx.Spec.Paused = true
-						sbx.Status.Phase = agentsv1alpha1.SandboxPaused
-						sbx.Status.Conditions = []metav1.Condition{{Type: string(agentsv1alpha1.SandboxConditionPaused), Status: metav1.ConditionTrue}}
-					}
-					oldTimeout := int32(100)
-					sbx.Spec.UpgradePolicy = &agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyRecreate, TimeoutSeconds: &oldTimeout}
-					sbx.Annotations = map[string]string{
-						agentsv1alpha1.AnnotationUpgradeOperation:     "old-operation",
-						agentsv1alpha1.AnnotationUpgradeResumeTrigger: agentsv1alpha1.True,
-					}
-					sbx.Labels[agentsv1alpha1.LabelSandboxUpgradeFailed] = agentsv1alpha1.True
-					sbx.Spec.Lifecycle = &agentsv1alpha1.SandboxLifecycle{PreUpgrade: &agentsv1alpha1.UpgradeAction{
-						Exec: &corev1.ExecAction{Command: []string{"old-hook"}},
-					}}
-					sbx.Status.UpgradeProgress = &agentsv1alpha1.SandboxUpgradeProgress{
-						OperationID: "old-operation", PreUpgrade: "Succeeded", PostUpgrade: "Succeeded",
-					}
-					r := newTestReconciler(sbx)
-					require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), sbx))
-					original := sbx.DeepCopy()
-					patches := 0
-					r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
-						Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
-							patches++
-							return c.Patch(ctx, obj, patch, opts...)
-						},
-					})
-					require.NoError(t, r.applySandboxPatch(t.Context(), sbx, ops))
-					require.Equal(t, 1, patches)
-					require.Equal(t, original, sbx)
-					updated := &agentsv1alpha1.Sandbox{}
-					require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), updated))
-					t.Cleanup(func() { ResourceVersionExpectations.Delete(updated) })
-					require.Equal(t, string(ops.UID), updated.Annotations[agentsv1alpha1.AnnotationUpgradeOperation])
-					require.Equal(t, ops.Name, updated.Labels[agentsv1alpha1.LabelSandboxUpdateOps])
-					require.NotContains(t, updated.Labels, agentsv1alpha1.LabelSandboxUpgradeFailed)
-					require.NotNil(t, updated.Spec.UpgradePolicy)
-					require.Equal(t, string(strategy), string(updated.Spec.UpgradePolicy.Type))
-					require.Equal(t, config.timeout, updated.Spec.UpgradePolicy.TimeoutSeconds)
-					require.Equal(t, ops.Spec.Lifecycle, updated.Spec.Lifecycle)
-					// SUO 只下发新身份；旧进度由 Sandbox Controller 接纳新操作时清理。
-					require.Equal(t, original.Status, updated.Status)
-					if paused {
-						require.Equal(t, "busybox:1.0", updated.Spec.Template.Spec.Containers[0].Image)
-						require.Equal(t, agentsv1alpha1.True, updated.Annotations[agentsv1alpha1.AnnotationUpgradeResumeTrigger])
-						// 模拟本轮恢复已完成；真实调谐门槛由第二阶段 Reconcile 用例覆盖。
-						updated.Status.Phase = agentsv1alpha1.SandboxUpgrading
-						updated.Status.UpgradeProgress.OperationID = string(ops.UID)
-						updated.Status.Conditions = []metav1.Condition{{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Status: metav1.ConditionFalse, Reason: agentsv1alpha1.SandboxUpgradingReasonResumeSucceed}}
-						require.NoError(t, r.Status().Update(t.Context(), updated))
-						phaseOne := updated.DeepCopy()
-						require.NoError(t, r.applyTemplatePatch(t.Context(), updated, ops))
-						require.Equal(t, phaseOne, updated)
-						require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), updated))
-						require.Equal(t, 2, patches)
-						require.Equal(t, phaseOne.Spec.UpgradePolicy, updated.Spec.UpgradePolicy)
-						require.Equal(t, phaseOne.Spec.Lifecycle, updated.Spec.Lifecycle)
-						require.Equal(t, phaseOne.Status, updated.Status)
-						require.Equal(t, string(ops.UID), updated.Annotations[agentsv1alpha1.AnnotationUpgradeOperation])
-					}
-					require.Equal(t, "busybox:2.0", updated.Spec.Template.Spec.Containers[0].Image)
-					require.NotContains(t, updated.Annotations, agentsv1alpha1.AnnotationUpgradeResumeTrigger)
-				})
-			}
-		}
-	}
-}
-
-func TestApplySandboxPatch_StaleVersion(t *testing.T) {
-	for _, phaseTwo := range []bool{false, true} {
-		t.Run(fmt.Sprintf("phaseTwo=%t", phaseTwo), func(t *testing.T) {
-			ops := newSandboxUpdateOps("stale-ops", "default", agentsv1alpha1.SandboxUpdateOpsUpdating, false, nil)
-			ops.UID = "old-operation"
-			ops.Spec.Patch = mustMarshalPatch(corev1.PodTemplateSpec{Spec: corev1.PodSpec{
-				Containers: []corev1.Container{{Name: "main", Image: "busybox:2.0"}},
-			}})
-			sbx := newSandbox("stale-patch", "default", ops.Name, agentsv1alpha1.SandboxRunning, nil)
-			r := newTestReconciler(sbx)
-			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), sbx))
-			current := sbx.DeepCopy()
-			current.Annotations = map[string]string{agentsv1alpha1.AnnotationUpgradeOperation: "new-operation"}
-			current.Spec.Template.Spec.Containers[0].Image = "busybox:3.0"
-			current.Spec.UpgradePolicy = &agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyInplaceUpdate}
-			require.NoError(t, r.Update(t.Context(), current))
-			var err error
-			if phaseTwo {
-				err = r.applyTemplatePatch(t.Context(), sbx, ops)
-			} else {
-				err = r.applySandboxPatch(t.Context(), sbx, ops)
-			}
-			require.True(t, apierrors.IsConflict(err), "expected conflict, got %v", err)
-			stored := &agentsv1alpha1.Sandbox{}
-			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), stored))
-			require.Equal(t, current, stored)
-		})
-	}
 }
 
 func TestValidateInplaceUpdateFeasible_EmptyInputReturnsEmpty(t *testing.T) {

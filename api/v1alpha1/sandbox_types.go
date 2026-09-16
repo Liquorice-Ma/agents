@@ -180,11 +180,6 @@ type SandboxUpgradePolicy struct {
 	// +kubebuilder:validation:Enum=Recreate;CheckpointRestore;InplaceUpdate
 	// +optional
 	Type SandboxUpgradePolicyType `json:"type,omitempty"`
-
-	// 每个 Sandbox 的完整升级预算（秒），不含 SUO 排队时间；未指定时为 300 秒。
-	// +optional
-	// +kubebuilder:validation:Minimum=1
-	TimeoutSeconds *int32 `json:"timeoutSeconds,omitempty"`
 }
 
 // PauseStrategyType enumerates the supported pause strategies.
@@ -481,10 +476,6 @@ type SandboxStatus struct {
 	// +optional
 	UpdateRevision string `json:"updateRevision,omitempty"`
 
-	// 本轮升级的持久化进度，用于预算和 hook 防重复；新 SUO 不继承旧轮次。
-	// +optional
-	UpgradeProgress *SandboxUpgradeProgress `json:"upgradeProgress,omitempty"`
-
 	// RecycledCount records the number of times this sandbox has been recycled.
 	// +optional
 	RecycledCount int32 `json:"recycledCount,omitempty"`
@@ -495,28 +486,6 @@ type SandboxStatus struct {
 	// +listType=map
 	// +listMapKey=reason
 	Schedules []Schedule `json:"schedules,omitempty"`
-}
-
-// SandboxUpgradeProgress 记录执行事实，不承载用户期望配置。
-type SandboxUpgradeProgress struct {
-	// 发起本轮升级的 SUO UID；非 SUO 触发时为空。
-	OperationID string `json:"operationID,omitempty"`
-	// 本轮实际接纳的目标 revision。
-	Revision string `json:"revision"`
-	// 本轮升级前的 Pod UID；重建策略必须观察到不同 UID，不能以 hash 相同冒充替换。
-	// +optional
-	SourcePodUID string `json:"sourcePodUID,omitempty"`
-	// 开始执行本轮生命周期的时刻，重试及 Controller 重启不重置。
-	StartedAt metav1.Time `json:"startedAt"`
-	// 本轮截止时间，创建时固定；修改配置不延长已经开始的预算。
-	Deadline metav1.Time `json:"deadline"`
-	// 执行前先记录 Running；重启后观察到 Running 表示结果未知，禁止盲目重跑。
-	// +optional
-	// +kubebuilder:validation:Enum=Running;Succeeded
-	PreUpgrade string `json:"preUpgrade,omitempty"`
-	// +optional
-	// +kubebuilder:validation:Enum=Running;Succeeded
-	PostUpgrade string `json:"postUpgrade,omitempty"`
 }
 
 // SandboxPhase is a label for the condition of a pod at the current time.
@@ -668,11 +637,6 @@ const (
 	SandboxUpgradingReasonPostUpgrade       = "PostUpgrade"
 	SandboxUpgradingReasonPostUpgradeFailed = "PostUpgradeFailed"
 	SandboxUpgradingReasonSucceeded         = "Succeeded"
-
-	// SandboxUpgradeProgress.PreUpgrade/PostUpgrade 的取值，与字段上的
-	// +kubebuilder:validation:Enum=Running;Succeeded 保持一致。
-	SandboxUpgradeHookRunning   = "Running"
-	SandboxUpgradeHookSucceeded = "Succeeded"
 
 	// SandboxConditionPaused Reason
 	SandboxPausedReasonPending      = "Pending"

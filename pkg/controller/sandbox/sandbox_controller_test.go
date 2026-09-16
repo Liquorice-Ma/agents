@@ -3501,89 +3501,6 @@ func TestSandboxReconcile_WithVolumeClaimTemplates(t *testing.T) {
 	}
 }
 
-func TestCalculateStatus_UpgradeOperationIdentity(t *testing.T) {
-	for _, tt := range []struct {
-		name                                                string
-		phase                                               agentsv1alpha1.SandboxPhase
-		newOperation, changedTarget, resumeTrigger, resumed bool
-		wantReset, wantPaused                               bool
-		wantReason                                          string
-	}{
-		{name: "new operation clears old failure and hooks", phase: agentsv1alpha1.SandboxUpgrading, newOperation: true, wantReset: true},
-		{name: "new operation from running without pod", phase: agentsv1alpha1.SandboxRunning, newOperation: true, wantReset: true},
-		{name: "new paused operation retains resume requirement", phase: agentsv1alpha1.SandboxPaused, newOperation: true, resumeTrigger: true, wantReset: true, wantPaused: true},
-		{name: "same failed operation after owner label removal", phase: agentsv1alpha1.SandboxUpgrading, wantPaused: true, wantReason: agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed},
-		{name: "same operation target mutation keeps original budget", phase: agentsv1alpha1.SandboxUpgrading, changedTarget: true, wantPaused: true, wantReason: agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed},
-		{name: "running handoff preserves budget", phase: agentsv1alpha1.SandboxRunning, changedTarget: true},
-		{name: "paused handoff preserves budget", phase: agentsv1alpha1.SandboxPaused, changedTarget: true, wantPaused: true},
-		{name: "deleted SUO after phase two preserves resume budget", phase: agentsv1alpha1.SandboxUpgrading, changedTarget: true, resumed: true, wantReason: agentsv1alpha1.SandboxUpgradingReasonPreUpgrade},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			box := &agentsv1alpha1.Sandbox{
-				ObjectMeta: metav1.ObjectMeta{Name: "operation-test", Namespace: "default", Generation: 3,
-					Annotations: map[string]string{agentsv1alpha1.AnnotationUpgradeOperation: "old-operation"}},
-				Spec: agentsv1alpha1.SandboxSpec{
-					Paused:                  tt.phase == agentsv1alpha1.SandboxPaused,
-					UpgradePolicy:           &agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyInplaceUpdate},
-					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{Template: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "fixed:v1"}}}}},
-				},
-			}
-			hash, _ := core.HashSandbox(box)
-			previousHash := hash
-			if tt.changedTarget {
-				previousHash = "previous-target"
-			}
-			reason := agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed
-			if tt.resumed {
-				reason = agentsv1alpha1.SandboxUpgradingReasonResumeSucceed
-			}
-			started := metav1.NewTime(time.Now().Add(-time.Minute))
-			box.Status = agentsv1alpha1.SandboxStatus{
-				Phase: tt.phase, UpdateRevision: previousHash,
-				UpgradeProgress: &agentsv1alpha1.SandboxUpgradeProgress{OperationID: "old-operation", Revision: previousHash, SourcePodUID: "original-pod", StartedAt: started, Deadline: metav1.NewTime(started.Add(300 * time.Second)), PreUpgrade: "Succeeded", PostUpgrade: "Succeeded"},
-				Conditions: []metav1.Condition{
-					{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Status: metav1.ConditionFalse, Reason: reason},
-					{Type: string(agentsv1alpha1.SandboxConditionInplaceUpdate), Status: metav1.ConditionFalse, Reason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed},
-				},
-			}
-			if !tt.resumed {
-				box.Status.Conditions = append(box.Status.Conditions, metav1.Condition{Type: string(agentsv1alpha1.SandboxConditionPaused), Status: metav1.ConditionTrue})
-			}
-			if tt.newOperation {
-				box.Annotations[agentsv1alpha1.AnnotationUpgradeOperation] = "new-operation"
-			}
-			if tt.resumeTrigger {
-				box.Annotations[agentsv1alpha1.AnnotationUpgradeResumeTrigger] = agentsv1alpha1.True
-			}
-			original := box.DeepCopy()
-			status, stop := (&SandboxReconciler{}).calculateStatus(t.Context(), core.EnsureFuncArgs{Box: box, NewStatus: box.Status.DeepCopy()})
-			require.False(t, stop)
-			require.Equal(t, agentsv1alpha1.SandboxUpgrading, status.Phase)
-			require.Equal(t, hash, status.UpdateRevision)
-			require.Nil(t, utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionInplaceUpdate)))
-			require.Equal(t, tt.wantPaused, utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionPaused)) != nil)
-			cond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionUpgrading))
-			if tt.wantReason == "" {
-				require.Nil(t, cond)
-			} else {
-				require.NotNil(t, cond)
-				require.Equal(t, tt.wantReason, cond.Reason)
-			}
-			if tt.wantReset {
-				require.Nil(t, status.UpgradeProgress)
-			} else {
-				expected := original.Status.UpgradeProgress.DeepCopy()
-				if tt.resumed {
-					expected.Revision = hash
-				}
-				require.Equal(t, expected, status.UpgradeProgress)
-			}
-			// 计算结果只写独立副本，不能污染 informer 对象。
-			require.Equal(t, original, box)
-		})
-	}
-}
-
 func TestCalculateStatus(t *testing.T) {
 	tests := []struct {
 		name              string
@@ -5981,13 +5898,10 @@ func TestReconcile_UpgradingPhase(t *testing.T) {
 		},
 	}
 
-	result, err := reconciler.Reconcile(context.Background(), req)
+	_, err := reconciler.Reconcile(context.Background(), req)
 	if err != nil {
 		t.Errorf("Reconcile() unexpected error: %v", err)
 	}
-	// 即使后续没有 Pod 事件，也必须安排预算到期时重新检查。
-	require.Positive(t, result.RequeueAfter)
-	require.LessOrEqual(t, result.RequeueAfter, 300*time.Second)
 
 	// Verify the sandbox transitioned to Upgrading
 	updatedSandbox := &agentsv1alpha1.Sandbox{}
@@ -5998,8 +5912,6 @@ func TestReconcile_UpgradingPhase(t *testing.T) {
 	if updatedSandbox.Status.Phase != agentsv1alpha1.SandboxUpgrading {
 		t.Errorf("Expected phase Upgrading, got %v", updatedSandbox.Status.Phase)
 	}
-	require.NotNil(t, updatedSandbox.Status.UpgradeProgress)
-	require.Equal(t, 300*time.Second, updatedSandbox.Status.UpgradeProgress.Deadline.Sub(updatedSandbox.Status.UpgradeProgress.StartedAt.Time))
 }
 
 // TestReconcile_ErrorPath_UpdatesSandboxStatus tests that when EnsureSandboxUpdated returns an error,

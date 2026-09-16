@@ -111,6 +111,3 @@ const AnnotationUpgradeResumeTrigger = InternalPrefix + "upgrade-resume-trigger"
 // and writes results to Pod.Status.Conditions.
 // See: https://openkruise.io/docs/user-manuals/podprobemarker#support-for-serverless-scenarios
 const AnnotationPodProbe = "kruise.io/podprobe"
-
-// AnnotationUpgradeOperation 由 SUO 下发其 UID，删除旧 SUO 后保留，避免误把删除当成新轮次。
-const AnnotationUpgradeOperation = InternalPrefix + "upgrade-operation"

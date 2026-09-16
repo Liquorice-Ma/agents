@@ -380,8 +380,6 @@ func (s sandboxUpdateState) String() string {
 
 func (r *Reconciler) classifySandbox(ctx context.Context, sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps) sandboxUpdateState {
 	otherOpsName := sbx.Labels[agentsv1alpha1.LabelSandboxUpdateOps]
-	operationID := sbx.Annotations[agentsv1alpha1.AnnotationUpgradeOperation]
-	belongsToOperation := otherOpsName == ops.Name && (operationID == "" || operationID == string(ops.UID))
 	// If the sandbox has a label from another ops, check whether that ops
 	// is still active. An active ops (Pending/Updating) owns the sandbox.
 	if otherOpsName != "" && otherOpsName != ops.Name {
@@ -396,11 +394,9 @@ func (r *Reconciler) classifySandbox(ctx context.Context, sbx *agentsv1alpha1.Sa
 	}
 	// Sandbox has no ops label, or the previous ops is no longer active.
 	// Treat it as a fresh candidate for the current ops.
-	if !belongsToOperation {
-		previous := findCondition(sbx.Status.Conditions, string(agentsv1alpha1.SandboxConditionUpgrading))
-		// spec 已相同不代表旧操作成功；失败目标允许用新 SUO 完整重试或改用 Recreate。
+	if otherOpsName != ops.Name {
 		if isSandboxTemplateMatchPatch(sbx, ops) && sbx.Status.Phase != agentsv1alpha1.SandboxUpgrading &&
-			(previous == nil || previous.Status == metav1.ConditionTrue) && sbx.Generation == sbx.Status.ObservedGeneration {
+			sbx.Generation == sbx.Status.ObservedGeneration {
 			return sandboxNoNeedUpdate
 		}
 		// Only Running, Upgrading, and explicitly included states are eligible
@@ -442,10 +438,6 @@ func (r *Reconciler) classifySandbox(ctx context.Context, sbx *agentsv1alpha1.Sa
 	if sbx.Generation != sbx.Status.ObservedGeneration {
 		return sandboxUpdating
 	}
-	// 新 UID 已下发、Sandbox 尚未接纳时，旧终态不得计入新 SUO。
-	if operationID != "" && (sbx.Status.UpgradeProgress == nil || sbx.Status.UpgradeProgress.OperationID != operationID) {
-		return sandboxUpdating
-	}
 
 	// Terminal: upgrade completed. All strategies, including InplaceUpdate,
 	// report their outcome through the Upgrading condition because they all
@@ -453,6 +445,7 @@ func (r *Reconciler) classifySandbox(ctx context.Context, sbx *agentsv1alpha1.Sa
 	if isUpgradeSucceeded(sbx) {
 		return sandboxUpdated
 	}
+
 	cond := findCondition(sbx.Status.Conditions, string(agentsv1alpha1.SandboxConditionUpgrading))
 	if cond != nil {
 		// Terminal: upgrade failed
@@ -510,10 +503,6 @@ func findCondition(conditions []metav1.Condition, condType string) *metav1.Condi
 // the terminal-success state (Reason=Succeeded, Status=True).
 func isUpgradeSucceeded(sbx *agentsv1alpha1.Sandbox) bool {
 	cond := findCondition(sbx.Status.Conditions, string(agentsv1alpha1.SandboxConditionUpgrading))
-	operationID := sbx.Annotations[agentsv1alpha1.AnnotationUpgradeOperation]
-	if operationID != "" && (sbx.Status.UpgradeProgress == nil || sbx.Status.UpgradeProgress.OperationID != operationID) {
-		return false
-	}
 	return cond != nil &&
 		cond.Reason == agentsv1alpha1.SandboxUpgradingReasonSucceeded &&
 		cond.Status == metav1.ConditionTrue
@@ -545,10 +534,15 @@ func (r *Reconciler) syncSandboxUpgradeState(ctx context.Context, sbx *agentsv1a
 		return // already in desired state
 	}
 
-	// 清理必须与分类时的版本一致，不能清掉新 SUO 刚写入的策略。
-	patchJSON := fmt.Sprintf(`{"metadata":{"resourceVersion":%q,"labels":{%s}}`, sbx.ResourceVersion, labelPatch)
+	patchJSON := "{"
+	if labelPatch != "" {
+		patchJSON += fmt.Sprintf(`"metadata":{"labels":{%s}}`, labelPatch)
+		if clearPolicy {
+			patchJSON += ","
+		}
+	}
 	if clearPolicy {
-		patchJSON += `,"spec":{"upgradePolicy":null}`
+		patchJSON += `"spec":{"upgradePolicy":null}`
 	}
 	patchJSON += "}"
 
@@ -601,9 +595,6 @@ func (r *Reconciler) handleDeletion(ctx context.Context, ops *agentsv1alpha1.San
 		if sbx.Labels[agentsv1alpha1.LabelSandboxUpdateOps] != ops.Name {
 			continue
 		}
-		if operationID := sbx.Annotations[agentsv1alpha1.AnnotationUpgradeOperation]; operationID != "" && operationID != string(ops.UID) {
-			continue
-		}
 		specPatch := ""
 		// Fallback cleanup: also clear the upgrade policy of sandboxes whose
 		// upgrade already succeeded, in case the per-sandbox cleanup in the
@@ -613,9 +604,8 @@ func (r *Reconciler) handleDeletion(ctx context.Context, ops *agentsv1alpha1.San
 		if isUpgradeSucceeded(sbx) && sbx.Spec.UpgradePolicy != nil {
 			specPatch = `,"spec":{"upgradePolicy":null}`
 		}
-		// 仅清理归属和恢复触发，保留操作 UID；删除操作本身不重启生命周期。
-		patchJSON := fmt.Sprintf(`{"metadata":{"resourceVersion":%q,"labels":{"%s":null},"annotations":{"%s":null}}%s}`,
-			sbx.ResourceVersion, agentsv1alpha1.LabelSandboxUpdateOps, agentsv1alpha1.AnnotationUpgradeResumeTrigger, specPatch)
+		patchJSON := fmt.Sprintf(`{"metadata":{"labels":{"%s":null},"annotations":{"%s":null}}%s}`,
+			agentsv1alpha1.LabelSandboxUpdateOps, agentsv1alpha1.AnnotationUpgradeResumeTrigger, specPatch)
 		rcvObject := &agentsv1alpha1.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{Namespace: sbx.Namespace, Name: sbx.Name},
 		}

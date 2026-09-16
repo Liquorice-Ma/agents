@@ -404,7 +404,7 @@ func (r *commonControl) handleInplaceUpdateSandbox(ctx context.Context, args Ens
 		control:  r.inplaceUpdateControl,
 		recorder: r.recorder,
 	}
-	return handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	return handleClaimInplaceUpdate(ctx, handler, pod, box, newStatus)
 }
 
 // CommonInPlaceUpdateHandler implements the inplace update handler for common controller
@@ -423,7 +423,7 @@ func (h *CommonInPlaceUpdateHandler) GetRecorder() record.EventRecorder {
 
 // Claim adapter 保留阶段事实并负责最终 Ready。done=true 也可能表示终止失败。
 // Pod 写入和最终状态写入仍通过 write-tracking client 记录 tracing。
-func handleInPlaceUpdateCommon(ctx context.Context, handler InPlaceUpdateHandler, pod *corev1.Pod,
+func handleClaimInplaceUpdate(ctx context.Context, handler InPlaceUpdateHandler, pod *corev1.Pod,
 	box *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus,
 ) (done bool, err error) {
 	previous := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
@@ -435,7 +435,7 @@ func handleInPlaceUpdateCommon(ctx context.Context, handler InPlaceUpdateHandler
 		setUpdateReady(newStatus, ready, agentsv1alpha1.SandboxReadyReasonInplaceUpdating, previous.Message)
 		return true, nil
 	}
-	result, stepErr := runInplaceUpdateStep(ctx, handler.GetInPlaceUpdateControl(), pod, box, newStatus.UpdateRevision)
+	result, stepErr := handleInPlaceUpdateCommon(ctx, handler.GetInPlaceUpdateControl(), pod, box, newStatus.UpdateRevision)
 	ready := podIsReady(pod)
 	msg := inplaceWaitMessage(pod)
 	reason := agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating

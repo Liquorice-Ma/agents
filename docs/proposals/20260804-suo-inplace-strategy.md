@@ -142,11 +142,11 @@ of `spec.upgradePolicy`:
 | Outcome reported via | `InplaceUpdate` condition | `Upgrading` condition |
 | Consumer | sandbox-manager delivery | SUO progress aggregation |
 
-Both paths share the same low-level engine, `runInplaceUpdateStep`, so the
+Both paths share the same low-level engine, `handleInPlaceUpdateCommon`, so the
 actual pod-patching semantics (QoS pre-check, resize handling, multi-round
 state annotation rebuild) stay in one place. The engine only establishes facts
 and reports terminal failures as classified errors; each path keeps a thin
-adapter (`handleInPlaceUpdateCommon`, `performInplaceUpgrade`) that dispatches
+adapter (`handleClaimInplaceUpdate`, `performInplaceUpgrade`) that dispatches
 those errors onto its own reporting channel with `errors.Is`/`errors.As`.
 
 The engine is fail-stop: when the target revision changes while a previous
@@ -311,7 +311,7 @@ the claim path.
 Both upgrade-trigger checks (from `Running` and from `Paused`) use
 `RequiresUpgradePhase`. When entering `Upgrading`, the stale `InplaceUpdate`
 condition of a previous round is removed alongside the stale `Upgrading`
-condition. This matters because `handleInPlaceUpdateCommon` leaves the condition
+condition. This matters because `handleClaimInplaceUpdate` leaves the condition
 untouched on some paths (notably a metadata-only change), so without the cleanup
 a stale `Failed` from an earlier round would be read as the current round's
 outcome.
@@ -418,7 +418,7 @@ matches what `Recreate` would do.
 
 ### Risk 3: Stale InplaceUpdate Condition Across Rounds
 
-`handleInPlaceUpdateCommon` does not always overwrite the `InplaceUpdate`
+`handleClaimInplaceUpdate` does not always overwrite the `InplaceUpdate`
 condition — a metadata-only change never sets it. A stale `Failed` from an
 earlier round would therefore be misread as the current round's outcome.
 Mitigated by removing the condition when entering the `Upgrading` phase
@@ -592,7 +592,7 @@ historical, not architectural.
     image/resources/metadata-only patches, and is inert when the
     `SandboxUpdateOpsInplacePatchValidation` gate is off.
   - Webhook `handleUpdate`: verify `updateStrategy.type` immutability.
-  - `handleInPlaceUpdateCommon`: verify a completed or terminally failed previous
+  - `handleClaimInplaceUpdate`: verify a completed or terminally failed previous
     round starts a new round (state annotation rebuilt with the new revision);
     verify an in-progress previous round waits.
 - **E2E tests**:

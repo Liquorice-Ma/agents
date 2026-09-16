@@ -324,7 +324,7 @@ func TestHandleInPlaceUpdateCommon(t *testing.T) {
 			handler := tc.setupHandler()
 
 			// Execute function
-			result, err := handleInPlaceUpdateCommon(ctx, handler, tc.pod, tc.box, tc.newStatus)
+			result, err := handleClaimInplaceUpdate(ctx, handler, tc.pod, tc.box, tc.newStatus)
 
 			// Verify result
 			if result != tc.expectedResult {
@@ -401,7 +401,7 @@ func TestHandleInPlaceUpdateCommon_WithUpdateInProgress(t *testing.T) {
 	}
 
 	// Execute function
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, err := handleClaimInplaceUpdate(ctx, handler, pod, box, newStatus)
 
 	// Verify result
 	if err != nil {
@@ -498,7 +498,7 @@ func TestHandleInPlaceUpdateCommon_QoSChangeRejected(t *testing.T) {
 		logger:   logr.Discard(),
 	}
 
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, err := handleClaimInplaceUpdate(ctx, handler, pod, box, newStatus)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -585,7 +585,7 @@ func TestHandleInPlaceUpdateCommon_MemoryDownscaleSkippedAdvisory(t *testing.T) 
 		logger:   logr.Discard(),
 	}
 
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, err := handleClaimInplaceUpdate(ctx, handler, pod, box, newStatus)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -685,7 +685,7 @@ func TestHandleInPlaceUpdateCommon_UnsupportedResizeReason(t *testing.T) {
 		logger:   logr.Discard(),
 	}
 
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, err := handleClaimInplaceUpdate(ctx, handler, pod, box, newStatus)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -788,7 +788,7 @@ func TestHandleInPlaceUpdateCommon_ResizeInfeasibleFailFast(t *testing.T) {
 		logger:   logr.Discard(),
 	}
 
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, err := handleClaimInplaceUpdate(ctx, handler, pod, box, newStatus)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -899,7 +899,7 @@ func TestHandleInPlaceUpdateCommon_TerminalFailureNotOverwritten(t *testing.T) {
 		logger:   logr.Discard(),
 	}
 
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, err := handleClaimInplaceUpdate(ctx, handler, pod, box, newStatus)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -969,7 +969,7 @@ func TestHandleInPlaceUpdateCommon_InitialState(t *testing.T) {
 	}
 
 	// Execute function
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, err := handleClaimInplaceUpdate(ctx, handler, pod, box, newStatus)
 
 	// Verify result
 	if err != nil {
@@ -983,7 +983,7 @@ func TestHandleInPlaceUpdateCommon_InitialState(t *testing.T) {
 }
 
 // buildMatchingHashBox creates a sandbox with correct hash for the given podSpec
-// so that handleInPlaceUpdateCommon passes the hash-immutable-part check.
+// so that handleClaimInplaceUpdate passes the hash-immutable-part check.
 func buildMatchingHashBox(name, ns string, podSpec corev1.PodSpec) *agentsv1alpha1.Sandbox {
 	tmpBox := &agentsv1alpha1.Sandbox{
 		Spec: agentsv1alpha1.SandboxSpec{
@@ -1050,7 +1050,7 @@ func TestHandleInPlaceUpdateCommon_RevisionMatchCompletedSucceeded(t *testing.T)
 		logger:   logr.Discard(),
 	}
 
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, err := handleClaimInplaceUpdate(ctx, handler, pod, box, newStatus)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -1117,7 +1117,7 @@ func TestHandleInPlaceUpdateCommon_AlreadySucceededIdempotent(t *testing.T) {
 	}
 
 	pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
-	done, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	done, err := handleClaimInplaceUpdate(ctx, handler, pod, box, newStatus)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -1177,7 +1177,7 @@ func TestHandleInPlaceUpdateCommon_RevisionMatchImageUpdateInProgress(t *testing
 		logger:   logr.Discard(),
 	}
 
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, err := handleClaimInplaceUpdate(ctx, handler, pod, box, newStatus)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -1240,7 +1240,7 @@ func TestHandleInPlaceUpdateCommon_GetPodInPlaceUpdateStateError(t *testing.T) {
 		logger:   logr.Discard(),
 	}
 
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, err := handleClaimInplaceUpdate(ctx, handler, pod, box, newStatus)
 	require.NoError(t, err)
 	require.True(t, result)
 	cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
@@ -1308,7 +1308,7 @@ func TestHandleInPlaceUpdateCommon_StateNotNilCompleted(t *testing.T) {
 		logger:   logr.Discard(),
 	}
 
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, err := handleClaimInplaceUpdate(ctx, handler, pod, box, newStatus)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -1426,7 +1426,7 @@ func TestHandleInPlaceUpdateCommon_StateNotNilNotCompletedTerminalErr(t *testing
 		logger:   logr.Discard(),
 	}
 
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, err := handleClaimInplaceUpdate(ctx, handler, pod, box, newStatus)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -1498,7 +1498,7 @@ func TestHandleInPlaceUpdateCommon_ImagePullFailureAcceptsCorrectedTarget(t *tes
 		logger:   logr.Discard(),
 	}
 
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, err := handleClaimInplaceUpdate(ctx, handler, pod, box, newStatus)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -1579,7 +1579,7 @@ func TestHandleInPlaceUpdateCommon_ImagePullBackoffWaits(t *testing.T) {
 		logger:   logr.Discard(),
 	}
 
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, err := handleClaimInplaceUpdate(ctx, handler, pod, box, newStatus)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -1652,7 +1652,7 @@ func TestHandleInPlaceUpdateCommon_StateNotNilNotCompletedNoTerminalErr(t *testi
 		logger:   logr.Discard(),
 	}
 
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, err := handleClaimInplaceUpdate(ctx, handler, pod, box, newStatus)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -1715,7 +1715,7 @@ func TestHandleInPlaceUpdateCommon_InplaceUpdateWithFakeClient(t *testing.T) {
 		logger:   logr.Discard(),
 	}
 
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, err := handleClaimInplaceUpdate(ctx, handler, pod, box, newStatus)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -1787,7 +1787,7 @@ func TestHandleInPlaceUpdateCommon_NoChangeReturnsTrue(t *testing.T) {
 		logger:   logr.Discard(),
 	}
 
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, err := handleClaimInplaceUpdate(ctx, handler, pod, box, newStatus)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -1847,7 +1847,7 @@ func TestHandleInPlaceUpdateCommon_MetadataOnlyChange(t *testing.T) {
 		logger:   logr.Discard(),
 	}
 
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, err := handleClaimInplaceUpdate(ctx, handler, pod, box, newStatus)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -1973,7 +1973,7 @@ func TestInplaceStepAndClaimState(t *testing.T) {
 				})
 				control := inplaceupdate.NewInPlaceUpdateControl(wrapped, inplaceupdate.DefaultGeneratePatchBodyFunc)
 				if caller == "engine" {
-					step, err := runInplaceUpdateStep(t.Context(), control, pod, box, "target")
+					step, err := handleInPlaceUpdateCommon(t.Context(), control, pod, box, "target")
 					require.Equal(t, tt.step, step)
 					if tt.hasError {
 						require.Error(t, err)
@@ -1989,7 +1989,7 @@ func TestInplaceStepAndClaimState(t *testing.T) {
 					recorder := record.NewFakeRecorder(20)
 					handler := &MockInPlaceUpdateHandler{control: control, recorder: recorder, logger: logr.Discard()}
 					status := &agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRunning, UpdateRevision: "target"}
-					done, err := handleInPlaceUpdateCommon(t.Context(), handler, pod, box, status)
+					done, err := handleClaimInplaceUpdate(t.Context(), handler, pod, box, status)
 					require.Equal(t, tt.done, done)
 					if tt.hasError && !tt.terminal {
 						require.ErrorIs(t, err, injected)
@@ -2014,7 +2014,7 @@ func TestInplaceStepAndClaimState(t *testing.T) {
 					if tt.terminal {
 						box.Status.UpdateRevision = status.UpdateRevision
 						before := patches
-						done, err = handleInPlaceUpdateCommon(t.Context(), handler, pod, box, status)
+						done, err = handleClaimInplaceUpdate(t.Context(), handler, pod, box, status)
 						require.NoError(t, err)
 						require.True(t, done)
 						require.Equal(t, before, patches)
@@ -2032,7 +2032,7 @@ func TestInplaceStepAndClaimState(t *testing.T) {
 						require.NotNil(t, state)
 						require.True(t, state.UpdateResources)
 						failWrites = false
-						done, err = handleInPlaceUpdateCommon(t.Context(), handler, current, box, status)
+						done, err = handleClaimInplaceUpdate(t.Context(), handler, current, box, status)
 						require.NoError(t, err)
 						require.False(t, done)
 						require.Equal(t, 1, resizes)
@@ -2047,7 +2047,7 @@ func TestInplaceStepAndClaimState(t *testing.T) {
 						require.True(t, state.UpdateResources)
 						require.Equal(t, original.Status, current.Status)
 						before := patches
-						done, err = handleInPlaceUpdateCommon(t.Context(), handler, current, box, status)
+						done, err = handleClaimInplaceUpdate(t.Context(), handler, current, box, status)
 						require.NoError(t, err)
 						require.False(t, done)
 						require.Equal(t, before, patches)
@@ -2060,11 +2060,11 @@ func TestInplaceStepAndClaimState(t *testing.T) {
 						require.Equal(t, agentsv1alpha1.SandboxRunning, status.Phase)
 						current.Status.ContainerStatuses[0].Resources = current.Spec.Containers[0].Resources.DeepCopy()
 						current.Status.Conditions[0].Status = corev1.ConditionFalse
-						done, err = handleInPlaceUpdateCommon(t.Context(), handler, current, box, status)
+						done, err = handleClaimInplaceUpdate(t.Context(), handler, current, box, status)
 						require.NoError(t, err)
 						require.False(t, done)
 						current.Status.Conditions[0].Status = corev1.ConditionTrue
-						done, err = handleInPlaceUpdateCommon(t.Context(), handler, current, box, status)
+						done, err = handleClaimInplaceUpdate(t.Context(), handler, current, box, status)
 						require.NoError(t, err)
 						require.True(t, done)
 						require.Equal(t, agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded, utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionInplaceUpdate)).Reason)

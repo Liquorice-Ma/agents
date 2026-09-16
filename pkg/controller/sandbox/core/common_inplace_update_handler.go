@@ -137,7 +137,7 @@ func validateInplaceUpdate(pod *corev1.Pod, box *agentsv1alpha1.Sandbox) (*inpla
 }
 
 // 配置生效与最终 Ready 分开判断，等待诊断由 adapter 根据 Pod 状态生成。
-func runInplaceUpdateStep(ctx context.Context, control *inplaceupdate.InPlaceUpdateControl,
+func handleInPlaceUpdateCommon(ctx context.Context, control *inplaceupdate.InPlaceUpdateControl,
 	pod *corev1.Pod, box *agentsv1alpha1.Sandbox, targetRevision string,
 ) (inplaceUpdateStepResult, error) {
 	if err := ctx.Err(); err != nil {

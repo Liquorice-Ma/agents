@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -134,17 +133,9 @@ func newTestCommonControl(hookFunc LifecycleHookFunc, objects ...client.Object) 
 	return control
 }
 
-// prepareUpgradeStepTest 准备已持久化预算和乐观锁版本的步骤测试数据。
+// prepareUpgradeStepTest 将 Sandbox 预置到 fake client，供 EnsureSandboxUpgraded 后续补丁使用。
 func prepareUpgradeStepTest(t *testing.T, c client.Client, args EnsureFuncArgs) {
 	t.Helper()
-	// 步骤测试从已经持久化预算的位置进入；首轮预算初始化由专门用例覆盖。
-	if args.NewStatus.UpgradeProgress == nil {
-		now := metav1.Now()
-		args.NewStatus.UpgradeProgress = &agentsv1alpha1.SandboxUpgradeProgress{
-			OperationID: args.Box.Annotations[agentsv1alpha1.AnnotationUpgradeOperation],
-			Revision:    args.NewStatus.UpdateRevision, StartedAt: now, Deadline: metav1.NewTime(now.Add(300 * time.Second)),
-		}
-	}
 	stored := &agentsv1alpha1.Sandbox{}
 	err := c.Get(t.Context(), client.ObjectKeyFromObject(args.Box), stored)
 	if apierrors.IsNotFound(err) {
@@ -294,7 +285,7 @@ func TestEnsureSandboxUpgraded(t *testing.T) {
 		TimeoutSeconds: 30,
 	}
 	now := metav1.Now()
-	// 供「失败后在预算内重试」用例统计 hook 实际执行次数。
+	// 供「失败后重试」用例统计 hook 实际执行次数。
 	retryHookCalls := 0
 
 	tests := []struct {
@@ -391,12 +382,12 @@ func TestEnsureSandboxUpgraded(t *testing.T) {
 			},
 		},
 		{
-			name: "preUpgrade failed retries within budget",
+			name: "preUpgrade failed retries on next reconcile",
 			pod:  newRunningPod(),
 			box: newUpgradeTestSandbox(&agentsv1alpha1.SandboxLifecycle{
 				PreUpgrade: preUpgradeHook,
 			}, nil),
-			// 上一轮已失败，但预算未耗尽：本轮重新执行 hook，仍失败则保持 PreUpgradeFailed。
+			// 上一轮已失败：本轮重新执行 hook，仍失败则保持 PreUpgradeFailed。
 			existingStatus: &agentsv1alpha1.SandboxStatus{
 				Phase:      agentsv1alpha1.SandboxUpgrading,
 				Conditions: []metav1.Condition{{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Status: metav1.ConditionFalse, Reason: agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed}},
@@ -554,36 +545,12 @@ func TestEnsureSandboxUpgraded(t *testing.T) {
 					},
 				},
 			},
-			// 已失败的 PostUpgrade 在预算内重新执行，仍失败则保持 PostUpgradeFailed。
+			// 已失败的 PostUpgrade 重新执行，仍失败则保持 PostUpgradeFailed。
 			mockHookFunc: mockLifecycleHookFunc(1, "", "still failing", nil),
 			expectErr:    false,
 			expectPhase:  agentsv1alpha1.SandboxUpgrading,
 			expectCondition: map[string]metav1.ConditionStatus{
 				string(agentsv1alpha1.SandboxConditionUpgrading): metav1.ConditionFalse,
-			},
-		},
-		{
-			name: "terminal upgrade condition only refreshes pod readiness",
-			pod:  newRunningPod(),
-			box:  newUpgradeTestSandbox(nil, nil),
-			existingStatus: &agentsv1alpha1.SandboxStatus{
-				Phase: agentsv1alpha1.SandboxUpgrading,
-				Conditions: []metav1.Condition{
-					{
-						Type:               string(agentsv1alpha1.SandboxConditionUpgrading),
-						Status:             metav1.ConditionTrue,
-						Reason:             agentsv1alpha1.SandboxUpgradingReasonUpgradePod,
-						Message:            "upgrade completed",
-						LastTransitionTime: now,
-					},
-				},
-			},
-			mockHookFunc: mockLifecycleHookFunc(0, "", "", nil),
-			expectErr:    false,
-			expectPhase:  agentsv1alpha1.SandboxUpgrading,
-			expectCondition: map[string]metav1.ConditionStatus{
-				string(agentsv1alpha1.SandboxConditionReady):     metav1.ConditionTrue,
-				string(agentsv1alpha1.SandboxConditionUpgrading): metav1.ConditionTrue,
 			},
 		},
 		{
@@ -807,254 +774,6 @@ func TestEnsureSandboxUpgraded(t *testing.T) {
 			if tt.hookCalls != nil {
 				require.Equal(t, tt.expectHookCalls, *tt.hookCalls, "hook 实际执行次数与预期不符")
 			}
-		})
-	}
-}
-
-func TestUpgradeBudgetInitialization(t *testing.T) {
-	customTimeout := int32(42)
-	for _, tt := range []struct {
-		name    string
-		timeout *int32
-		want    time.Duration
-	}{
-		{name: "default", want: 300 * time.Second},
-		{name: "configured", timeout: &customTimeout, want: 42 * time.Second},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			box := newUpgradeTestSandbox(&agentsv1alpha1.SandboxLifecycle{
-				PreUpgrade: &agentsv1alpha1.UpgradeAction{Exec: &corev1.ExecAction{Command: []string{"pre"}}},
-			}, &agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyRecreate, TimeoutSeconds: tt.timeout})
-			box.Annotations[agentsv1alpha1.AnnotationUpgradeOperation] = "budget-operation"
-			pod := newRunningPod()
-			pod.UID = "source-pod"
-			calls := 0
-			control := newTestCommonControl(func(context.Context, *agentsv1alpha1.Sandbox, *agentsv1alpha1.UpgradeAction) (int32, string, string, error) {
-				calls++
-				return 0, "", "", nil
-			}, box.DeepCopy(), pod.DeepCopy())
-			require.NoError(t, control.Get(t.Context(), client.ObjectKeyFromObject(box), box))
-			status := box.Status.DeepCopy()
-			status.UpdateRevision = "new-revision"
-			before := time.Now()
-			require.NoError(t, control.EnsureSandboxUpgraded(t.Context(), EnsureFuncArgs{Pod: pod, Box: box, NewStatus: status}))
-			progress := status.UpgradeProgress
-			require.NotNil(t, progress)
-			require.Equal(t, "budget-operation", progress.OperationID)
-			require.Equal(t, "new-revision", progress.Revision)
-			require.Equal(t, string(pod.UID), progress.SourcePodUID)
-			require.Equal(t, tt.want, progress.Deadline.Sub(progress.StartedAt.Time))
-			require.False(t, progress.StartedAt.Before(&metav1.Time{Time: before}))
-			require.Zero(t, calls)
-			storedPod := &corev1.Pod{}
-			require.NoError(t, control.Get(t.Context(), client.ObjectKeyFromObject(pod), storedPod))
-			require.Equal(t, pod.Spec, storedPod.Spec)
-
-			// 模拟外层落盘以及 Controller 重启，随后继续使用原预算。
-			box.Status = *status.DeepCopy()
-			require.NoError(t, control.Status().Update(t.Context(), box))
-			reloaded := &agentsv1alpha1.Sandbox{}
-			require.NoError(t, control.Get(t.Context(), client.ObjectKeyFromObject(box), reloaded))
-			persisted := reloaded.Status.UpgradeProgress.DeepCopy()
-			restarted := newTestCommonControl(control.lifecycleHookFunc, reloaded.DeepCopy(), storedPod.DeepCopy())
-			status = reloaded.Status.DeepCopy()
-			require.NoError(t, restarted.EnsureSandboxUpgraded(t.Context(), EnsureFuncArgs{Pod: storedPod, Box: reloaded, NewStatus: status}))
-			require.Equal(t, 1, calls)
-			require.Equal(t, persisted.StartedAt, status.UpgradeProgress.StartedAt)
-			require.Equal(t, persisted.Deadline, status.UpgradeProgress.Deadline)
-		})
-	}
-}
-
-func TestUpgradeDeadline(t *testing.T) {
-	for _, tt := range []struct {
-		name, reason, wantReason                            string
-		postSucceeded, ready, withinBudget, changedRevision bool
-	}{
-		{name: "pre timeout", reason: agentsv1alpha1.SandboxUpgradingReasonPreUpgrade, wantReason: agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed},
-		{name: "checkpoint timeout", reason: agentsv1alpha1.SandboxUpgradingReasonCheckpointing, wantReason: agentsv1alpha1.SandboxUpgradingReasonCheckpointFailed},
-		{name: "configuration timeout", reason: agentsv1alpha1.SandboxUpgradingReasonUpgradePod, wantReason: agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed},
-		{name: "post timeout", reason: agentsv1alpha1.SandboxUpgradingReasonPostUpgrade, wantReason: agentsv1alpha1.SandboxUpgradingReasonPostUpgradeFailed},
-		{name: "resume timeout", reason: agentsv1alpha1.SandboxUpgradingReasonResuming, wantReason: agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed},
-		{name: "final readiness timeout", reason: agentsv1alpha1.SandboxUpgradingReasonPostUpgrade, postSucceeded: true, wantReason: agentsv1alpha1.SandboxUpgradingReasonPostUpgradeFailed},
-		{name: "completed hook and ready wins", reason: agentsv1alpha1.SandboxUpgradingReasonPostUpgrade, postSucceeded: true, ready: true, wantReason: agentsv1alpha1.SandboxUpgradingReasonSucceeded},
-		{name: "wait within original budget", reason: agentsv1alpha1.SandboxUpgradingReasonPostUpgrade, postSucceeded: true, withinBudget: true, wantReason: agentsv1alpha1.SandboxUpgradingReasonPostUpgrade},
-		{name: "same operation target change", reason: agentsv1alpha1.SandboxUpgradingReasonUpgradePod, withinBudget: true, changedRevision: true, wantReason: agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			box := newUpgradeTestSandbox(nil, nil)
-			pod := newRunningPod()
-			pod.UID = "original-pod"
-			if !tt.ready {
-				pod.Status.Conditions[0].Status = corev1.ConditionFalse
-			}
-			deadline := time.Now().Add(-time.Minute)
-			if tt.withinBudget {
-				deadline = time.Now().Add(time.Minute)
-			}
-			status := &agentsv1alpha1.SandboxStatus{
-				Phase: agentsv1alpha1.SandboxUpgrading, UpdateRevision: "target",
-				UpgradeProgress: &agentsv1alpha1.SandboxUpgradeProgress{OperationID: "operation", Revision: "target", StartedAt: metav1.NewTime(deadline.Add(-300 * time.Second)), Deadline: metav1.NewTime(deadline)},
-				Conditions:      []metav1.Condition{{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Status: metav1.ConditionFalse, Reason: tt.reason}},
-			}
-			if tt.postSucceeded {
-				status.UpgradeProgress.PostUpgrade = "Succeeded"
-			}
-			if tt.changedRevision {
-				status.UpdateRevision = "changed"
-			}
-			original := status.UpgradeProgress.DeepCopy()
-			calls := 0
-			control := newTestCommonControl(func(context.Context, *agentsv1alpha1.Sandbox, *agentsv1alpha1.UpgradeAction) (int32, string, string, error) {
-				calls++
-				return 0, "", "", nil
-			}, pod.DeepCopy())
-			args := EnsureFuncArgs{Pod: pod, Box: box, NewStatus: status}
-			prepareUpgradeStepTest(t, control.Client, args)
-			require.NoError(t, control.EnsureSandboxUpgraded(t.Context(), args))
-			cond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionUpgrading))
-			require.Equal(t, tt.wantReason, cond.Reason)
-			require.Equal(t, original, status.UpgradeProgress)
-			require.Zero(t, calls)
-			stored := &corev1.Pod{}
-			require.NoError(t, control.Get(t.Context(), client.ObjectKeyFromObject(pod), stored))
-			require.Equal(t, pod.UID, stored.UID)
-			require.Equal(t, pod.Spec, stored.Spec)
-			if tt.wantReason == agentsv1alpha1.SandboxUpgradingReasonSucceeded {
-				require.Equal(t, agentsv1alpha1.SandboxRunning, status.Phase)
-				require.Equal(t, metav1.ConditionTrue, cond.Status)
-			} else {
-				require.Equal(t, agentsv1alpha1.SandboxUpgrading, status.Phase)
-				require.Equal(t, metav1.ConditionFalse, utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionReady)).Status)
-				if !tt.withinBudget {
-					require.Contains(t, cond.Message, "deadline exceeded")
-				}
-			}
-		})
-	}
-}
-
-func TestUpgradeHookPersistence(t *testing.T) {
-	for _, pre := range []bool{true, false} {
-		for _, tt := range []struct {
-			name, mark                     string
-			failPatch, exitCode, wantCalls int
-			wantErr, wantSuccess           bool
-			// retryable 表示确定失败已清除标记，重启后仍允许在预算内重跑。
-			retryable bool
-		}{
-			{name: "success persists and skips replay", wantCalls: 1, wantSuccess: true},
-			{name: "already succeeded", mark: "Succeeded", wantSuccess: true},
-			{name: "unknown result stops", mark: "Running"},
-			{name: "explicit failure allows retry", exitCode: 1, wantCalls: 1, retryable: true},
-			{name: "intent write fails before execution", failPatch: 1, wantErr: true},
-			{name: "success write fails after execution", failPatch: 2, wantCalls: 1, wantErr: true},
-		} {
-			t.Run(fmt.Sprintf("pre=%t/%s", pre, tt.name), func(t *testing.T) {
-				action := &agentsv1alpha1.UpgradeAction{Exec: &corev1.ExecAction{Command: []string{"hook"}}}
-				box := newUpgradeTestSandbox(&agentsv1alpha1.SandboxLifecycle{PreUpgrade: action, PostUpgrade: action.DeepCopy()}, nil)
-				pod := newRunningPod()
-				control := newTestCommonControl(nil, pod.DeepCopy())
-				status := box.Status.DeepCopy()
-				args := EnsureFuncArgs{Pod: pod, Box: box, NewStatus: status}
-				prepareUpgradeStepTest(t, control.Client, args)
-				mark := &status.UpgradeProgress.PostUpgrade
-				if pre {
-					mark = &status.UpgradeProgress.PreUpgrade
-				}
-				*mark = tt.mark
-				box.Status = *status.DeepCopy()
-				require.NoError(t, control.Status().Update(t.Context(), box))
-				calls, patches := 0, 0
-				control.upgradeControl.lifecycleHookFunc = func(ctx context.Context, _ *agentsv1alpha1.Sandbox, _ *agentsv1alpha1.UpgradeAction) (int32, string, string, error) {
-					calls++
-					stored := &agentsv1alpha1.Sandbox{}
-					require.NoError(t, control.Get(ctx, client.ObjectKeyFromObject(box), stored))
-					storedMark := stored.Status.UpgradeProgress.PostUpgrade
-					if pre {
-						storedMark = stored.Status.UpgradeProgress.PreUpgrade
-					}
-					require.Equal(t, "Running", storedMark, "执行 hook 前必须先落盘意图")
-					return int32(tt.exitCode), "", "", nil
-				}
-				control.upgradeControl.Client = interceptor.NewClient(control.Client.(client.WithWatch), interceptor.Funcs{
-					SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
-						patches++
-						if patches == tt.failPatch {
-							return fmt.Errorf("injected status conflict")
-						}
-						return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
-					},
-				})
-				result, err := control.upgradeControl.runUpgradeHook(t.Context(), args, pre)
-				if tt.wantErr {
-					require.Error(t, err)
-				} else {
-					require.NoError(t, err)
-				}
-				require.Equal(t, tt.wantSuccess, result.Succeeded)
-				require.Equal(t, tt.wantCalls, calls)
-				stored := &agentsv1alpha1.Sandbox{}
-				require.NoError(t, control.Get(t.Context(), client.ObjectKeyFromObject(box), stored))
-				if tt.failPatch == 1 {
-					require.Empty(t, *mark)
-					return
-				}
-				// 从存储恢复，不依赖首次调用的内存标记，验证重启后的重跑判定。
-				args.Box = stored
-				args.NewStatus = stored.Status.DeepCopy()
-				replay, err := control.upgradeControl.runUpgradeHook(t.Context(), args, pre)
-				require.NoError(t, err)
-				require.Equal(t, tt.wantSuccess, replay.Succeeded)
-				wantReplayCalls := tt.wantCalls
-				if tt.retryable {
-					// 确定失败已把标记清回空并落盘，因此本次会真的重新执行 hook。
-					wantReplayCalls++
-				}
-				require.Equal(t, wantReplayCalls, calls)
-				if tt.retryable {
-					require.Contains(t, replay.Message, "exit code")
-				} else if !tt.wantSuccess {
-					require.Contains(t, replay.Message, "unknown")
-				}
-			})
-		}
-	}
-}
-
-func TestPostUpgradeWaitsForReadyWithoutReplay(t *testing.T) {
-	for _, policy := range []agentsv1alpha1.SandboxUpgradePolicyType{agentsv1alpha1.SandboxUpgradePolicyInplaceUpdate, agentsv1alpha1.SandboxUpgradePolicyRecreate} {
-		t.Run(string(policy), func(t *testing.T) {
-			box := newUpgradeTestSandbox(&agentsv1alpha1.SandboxLifecycle{
-				PostUpgrade: &agentsv1alpha1.UpgradeAction{Exec: &corev1.ExecAction{Command: []string{"post"}}},
-			}, &agentsv1alpha1.SandboxUpgradePolicy{Type: policy})
-			_, hash := HashSandbox(box)
-			box.Annotations[agentsv1alpha1.SandboxHashImmutablePart] = hash
-			pod := newRunningPod()
-			pod.Labels[agentsv1alpha1.PodLabelTemplateHash] = "target"
-			pod.Spec.Containers[0].Image = "test:v2"
-			pod.Status.ContainerStatuses[0].Image = "test:v2"
-			pod.Status.Conditions[0].Status = corev1.ConditionFalse
-			calls := 0
-			control := newTestCommonControl(func(context.Context, *agentsv1alpha1.Sandbox, *agentsv1alpha1.UpgradeAction) (int32, string, string, error) {
-				calls++
-				return 0, "", "", nil
-			}, pod.DeepCopy())
-			status := &agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxUpgrading, UpdateRevision: "target",
-				Conditions: []metav1.Condition{{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Status: metav1.ConditionFalse, Reason: agentsv1alpha1.SandboxUpgradingReasonUpgradePod}}}
-			args := EnsureFuncArgs{Pod: pod, Box: box, NewStatus: status}
-			prepareUpgradeStepTest(t, control.Client, args)
-			for range 2 {
-				require.NoError(t, control.EnsureSandboxUpgraded(t.Context(), args))
-				require.Equal(t, 1, calls)
-				require.Equal(t, "Succeeded", status.UpgradeProgress.PostUpgrade)
-				require.Equal(t, agentsv1alpha1.SandboxUpgradingReasonPostUpgrade, utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionUpgrading)).Reason)
-				require.Equal(t, metav1.ConditionFalse, utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionReady)).Status)
-			}
-			pod.Status.Conditions[0].Status = corev1.ConditionTrue
-			require.NoError(t, control.EnsureSandboxUpgraded(t.Context(), args))
-			require.Equal(t, 1, calls)
-			require.Equal(t, agentsv1alpha1.SandboxRunning, status.Phase)
 		})
 	}
 }
@@ -1511,101 +1230,6 @@ func TestExecuteUpgradePodStep_Branches(t *testing.T) {
 	}
 }
 
-// 同轮失败停止执行；控制器接纳新 SUO 后，Recreate 与 inplace 均可补救。
-// 新 UID 的接纳与旧状态清理由控制器级测试覆盖。
-func TestInplaceUpgradeFailedRecovery(t *testing.T) {
-	newFailedStatus := func(revision string) *agentsv1alpha1.SandboxStatus {
-		return &agentsv1alpha1.SandboxStatus{
-			Phase:          agentsv1alpha1.SandboxUpgrading,
-			UpdateRevision: revision,
-			Conditions: []metav1.Condition{
-				{
-					Type:               string(agentsv1alpha1.SandboxConditionUpgrading),
-					Status:             metav1.ConditionFalse,
-					Reason:             agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed,
-					Message:            "in-place upgrade only supports changing container images, resources and template metadata",
-					LastTransitionTime: metav1.Now(),
-				},
-			},
-		}
-	}
-
-	t.Run("new operation can recover with Recreate", func(t *testing.T) {
-		// 先验证仅改变策略不会重放旧轮次，再模拟新操作已被接纳。
-		box := newUpgradeTestSandbox(nil, &agentsv1alpha1.SandboxUpgradePolicy{
-			Type: agentsv1alpha1.SandboxUpgradePolicyRecreate,
-		})
-		pod := newRunningPod() // label old-revision != target new-revision
-		ctrl := newTestUpgradeControlForInplace(pod.DeepCopy())
-		newStatus := newFailedStatus("new-revision")
-
-		args := EnsureFuncArgs{Pod: pod, Box: box, NewStatus: newStatus}
-		prepareUpgradeStepTest(t, ctrl.Client, args)
-		err := ctrl.EnsureSandboxUpgraded(t.Context(), args)
-		require.NoError(t, err)
-		require.NoError(t, ctrl.Get(t.Context(), client.ObjectKeyFromObject(pod), &corev1.Pod{}))
-		require.Equal(t, agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed,
-			utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading)).Reason)
-
-		// 模拟新 UID 接纳后的状态；首轮只创建预算，下一轮才删除旧 Pod。
-		box.Annotations[agentsv1alpha1.AnnotationUpgradeOperation] = "replacement-operation"
-		utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
-		newStatus.UpgradeProgress = nil
-		require.NoError(t, ctrl.EnsureSandboxUpgraded(t.Context(), args))
-		require.Equal(t, "replacement-operation", newStatus.UpgradeProgress.OperationID)
-		require.NoError(t, ctrl.Get(t.Context(), client.ObjectKeyFromObject(pod), &corev1.Pod{}))
-		err = ctrl.EnsureSandboxUpgraded(t.Context(), args)
-		require.NoError(t, err)
-		var gone corev1.Pod
-		getErr := ctrl.Get(context.TODO(), types.NamespacedName{Namespace: pod.Namespace, Name: pod.Name}, &gone)
-		assert.True(t, apierrors.IsNotFound(getErr), "old pod should be deleted by the recreate path")
-
-		// Reconcile 2: with the pod gone, the recreate path creates a new pod
-		// rendered from the current template (i.e. at the target revision).
-		err = ctrl.EnsureSandboxUpgraded(context.TODO(), EnsureFuncArgs{Pod: nil, Box: box, NewStatus: newStatus})
-		assert.NoError(t, err)
-		var fresh corev1.Pod
-		assert.NoError(t, ctrl.Get(context.TODO(), types.NamespacedName{Namespace: pod.Namespace, Name: pod.Name}, &fresh))
-		assert.Equal(t, newStatus.UpdateRevision, fresh.Labels[agentsv1alpha1.PodLabelTemplateHash],
-			"replacement pod should carry the target revision")
-	})
-
-	t.Run("new operation can recover with inplace rollback", func(t *testing.T) {
-		// 原轮次在写入前拒绝；新操作目标与旧 Pod 一致时仍走完整生命周期。
-		box := newUpgradeTestSandbox(nil, &agentsv1alpha1.SandboxUpgradePolicy{
-			Type: agentsv1alpha1.SandboxUpgradePolicyInplaceUpdate,
-		})
-		_, h := HashSandbox(box)
-		box.Annotations[agentsv1alpha1.SandboxHashImmutablePart] = h
-		pod := newRunningPod()
-		pod.UID = "unchanged-pod"
-		box.Spec.Template.Spec.Containers[0].Image = "test:v1"
-		ctrl := newTestUpgradeControlForInplace(pod.DeepCopy())
-		// 回退目标与当前实际配置一致。
-		newStatus := newFailedStatus("old-revision")
-
-		args := EnsureFuncArgs{Pod: pod, Box: box, NewStatus: newStatus}
-		prepareUpgradeStepTest(t, ctrl.Client, args)
-		require.NoError(t, ctrl.EnsureSandboxUpgraded(t.Context(), args))
-		require.Equal(t, agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed,
-			utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading)).Reason)
-		box.Annotations[agentsv1alpha1.AnnotationUpgradeOperation] = "rollback-operation"
-		utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
-		newStatus.UpgradeProgress = nil
-		require.NoError(t, ctrl.EnsureSandboxUpgraded(t.Context(), args))
-		require.Equal(t, "rollback-operation", newStatus.UpgradeProgress.OperationID)
-		require.NoError(t, ctrl.EnsureSandboxUpgraded(t.Context(), args))
-		assert.Equal(t, agentsv1alpha1.SandboxRunning, newStatus.Phase)
-		storedPod := &corev1.Pod{}
-		require.NoError(t, ctrl.Get(t.Context(), client.ObjectKeyFromObject(pod), storedPod))
-		require.Equal(t, pod.UID, storedPod.UID)
-		c := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
-		if assert.NotNil(t, c) {
-			assert.Equal(t, agentsv1alpha1.SandboxUpgradingReasonSucceeded, c.Reason)
-		}
-	})
-}
-
 // 新操作已接纳后，即使旧镜像还在退避，也能通过 inplace 下发正确镜像。
 // 回到原镜像时允许 ImageID 不变，但必须观察目标容器运行并等待最终 Ready。
 func TestInplaceUpgradeRollbackWhileStuck(t *testing.T) {
@@ -1613,7 +1237,6 @@ func TestInplaceUpgradeRollbackWhileStuck(t *testing.T) {
 		Type: agentsv1alpha1.SandboxUpgradePolicyInplaceUpdate,
 	})
 	// 新 SUO 将模板回退到原镜像。
-	box.Annotations[agentsv1alpha1.AnnotationUpgradeOperation] = "corrected-operation"
 	box.Spec.Template.Spec.Containers[0].Image = "test:v1"
 	_, h := HashSandbox(box)
 	box.Annotations[agentsv1alpha1.SandboxHashImmutablePart] = h
@@ -1680,7 +1303,6 @@ func TestInplaceUpgradeRollbackWhileStuck(t *testing.T) {
 	c = utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
 	require.Equal(t, agentsv1alpha1.SandboxUpgradingReasonPostUpgrade, c.Reason)
 	require.Equal(t, metav1.ConditionFalse, c.Status)
-	require.Equal(t, "Succeeded", newStatus.UpgradeProgress.PostUpgrade)
 	patched.Status.Conditions[0].Status = corev1.ConditionTrue
 	require.NoError(t, ctrl.EnsureSandboxUpgraded(t.Context(), args))
 	require.Equal(t, agentsv1alpha1.SandboxRunning, newStatus.Phase)
@@ -1917,7 +1539,7 @@ func TestEnsureSandboxUpgraded_CheckpointRestore(t *testing.T) {
 			expectReason: agentsv1alpha1.SandboxUpgradingReasonUpgradePod,
 		},
 		{
-			name: "CheckpointRestore - Checkpoint failed stops operation",
+			name: "CheckpointRestore - Checkpoint failed, returns error",
 			pod:  newRunningPod(),
 			box:  newCheckpointRestoreSandbox(nil),
 			existingStatus: &agentsv1alpha1.SandboxStatus{
@@ -1939,7 +1561,7 @@ func TestEnsureSandboxUpgraded_CheckpointRestore(t *testing.T) {
 				}(),
 			},
 			mockHookFunc: mockLifecycleHookFunc(0, "", "", nil),
-			expectErr:    false,
+			expectErr:    true,
 			expectPhase:  agentsv1alpha1.SandboxUpgrading,
 			expectReason: agentsv1alpha1.SandboxUpgradingReasonCheckpointFailed,
 		},
@@ -2326,7 +1948,6 @@ func TestPerformRecreateUpgrade_CheckpointRestore_CreatePod(t *testing.T) {
 		Box:       box,
 		NewStatus: newStatus2,
 	}
-	newStatus2.UpgradeProgress = newStatus.UpgradeProgress.DeepCopy()
 	err = control.EnsureSandboxUpgraded(context.TODO(), args2)
 	assert.NoError(t, err)
 

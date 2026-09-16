@@ -134,7 +134,7 @@ func mergeTemplate(modified *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.Sandbox
 // logs the operation, and records a resource-version expectation. The tag
 // is appended to log messages to distinguish phase 2 from normal upgrades.
 func (r *Reconciler) patchAndExpect(ctx context.Context, sbx, modified *agentsv1alpha1.Sandbox, tag string) error {
-	patch := client.MergeFromWithOptions(sbx, client.MergeFromWithOptimisticLock{})
+	patch := client.MergeFrom(sbx)
 	patchData, patchErr := patch.Data(modified)
 	if patchErr != nil {
 		klog.ErrorS(patchErr, "Failed to compute patch data"+tag, "sandbox", klog.KObj(sbx))
@@ -182,32 +182,20 @@ func validateInplaceUpdateFeasible(sbx *agentsv1alpha1.Sandbox, ops *agentsv1alp
 func (r *Reconciler) applySandboxPatch(ctx context.Context, sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps) error {
 	modified := sbx.DeepCopy()
 
-	// Set UpgradePolicy based on strategy type
+	// Set UpgradePolicy based on strategy type. InplaceUpdate keeps the pod but
+	// still runs the upgrade lifecycle, so it needs an explicit policy too; leaving
+	// it unset would instead select the SandboxClaim in-place path, which stays in
+	// Running and is not observable as an upgrade.
+	policyType := agentsv1alpha1.SandboxUpgradePolicyRecreate
 	switch ops.Spec.UpdateStrategy.Type {
-	case agentsv1alpha1.SandboxUpdateOpsStrategyInplaceUpdate:
-		// InplaceUpdate keeps the pod but still runs the upgrade lifecycle, so the
-		// sandbox needs an explicit policy. Leaving the policy unset would instead
-		// select the SandboxClaim in-place path, which stays in Running and is not
-		// observable as an upgrade.
-		modified.Spec.UpgradePolicy = &agentsv1alpha1.SandboxUpgradePolicy{
-			Type: agentsv1alpha1.SandboxUpgradePolicyInplaceUpdate,
-		}
 	case agentsv1alpha1.SandboxUpdateOpsStrategyCheckpointRestore:
-		modified.Spec.UpgradePolicy = &agentsv1alpha1.SandboxUpgradePolicy{
-			Type: agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore,
-		}
-	default:
-		modified.Spec.UpgradePolicy = &agentsv1alpha1.SandboxUpgradePolicy{
-			Type: agentsv1alpha1.SandboxUpgradePolicyRecreate,
-		}
+		policyType = agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore
+	case agentsv1alpha1.SandboxUpdateOpsStrategyInplaceUpdate:
+		policyType = agentsv1alpha1.SandboxUpgradePolicyInplaceUpdate
 	}
-
-	// 新 SUO 的 UID 与目标配置原子下发，确保旧失败和 hook 记录不会被新操作继承。
-	modified.Spec.UpgradePolicy.TimeoutSeconds = ops.Spec.UpdateStrategy.TimeoutSeconds
-	if modified.Annotations == nil {
-		modified.Annotations = map[string]string{}
+	modified.Spec.UpgradePolicy = &agentsv1alpha1.SandboxUpgradePolicy{
+		Type: policyType,
 	}
-	modified.Annotations[agentsv1alpha1.AnnotationUpgradeOperation] = string(ops.UID)
 
 	// Set Lifecycle
 	if ops.Spec.Lifecycle != nil {
@@ -235,8 +223,7 @@ func (r *Reconciler) applySandboxPatch(ctx context.Context, sbx *agentsv1alpha1.
 		return r.patchAndExpect(ctx, sbx, modified, " (resume trigger)")
 	}
 
-	// 非 Paused 状态直接下发目标，旧恢复触发不能阻挡新 SUO 的补救。
-	delete(modified.Annotations, agentsv1alpha1.AnnotationUpgradeResumeTrigger)
+	// Normal upgrade (Running): apply template patch.
 	if err := mergeTemplate(modified, ops); err != nil {
 		return err
 	}
