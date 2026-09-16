@@ -420,15 +420,13 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 		ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerEnsureSandboxUpgraded)
 		err = r.getControl(args.Pod).EnsureSandboxUpgraded(ctx, args)
 		tracing.EndSpan(ctx, span, err)
-		// 即使 Pod 不再产生事件，也必须在预算耗尽时结束等待。
+		// 即使 Pod 不再产生事件，也必须在预算耗尽时结束等待。预算已过则无需再排队：
+		// 到期判定已经写入终态，重复排队只会空转。
 		if newStatus.Phase == agentsv1alpha1.SandboxUpgrading && newStatus.UpgradeProgress != nil {
 			cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
-			if !core.IsUpgradeFailed(cond) && (cond == nil || cond.Status != metav1.ConditionTrue) {
+			if cond == nil || cond.Status != metav1.ConditionTrue {
 				delay := time.Until(newStatus.UpgradeProgress.Deadline.Time)
-				if delay <= 0 {
-					delay = time.Millisecond
-				}
-				if requeueAfter == 0 || delay < requeueAfter {
+				if delay > 0 && (requeueAfter == 0 || delay < requeueAfter) {
 					requeueAfter = delay
 				}
 			}

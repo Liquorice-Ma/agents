@@ -146,7 +146,10 @@ func RequiresInplaceUpgrade(box *agentsv1alpha1.Sandbox) bool {
 //
 //	Resuming → ResumeSucceed → PreUpgrade → Checkpointing → UpgradePod → PostUpgrade → Succeeded
 //
-// 失败状态停止本轮自动推进。新 SUO 重置生命周期；同轮成功 hook 不重复执行。
+// 失败的 hook 步骤不终止本轮：修正 spec.lifecycle 后的下一次 reconcile 重新执行，直到
+// progress.Deadline 到期才停止执行新副作用。Checkpointing 和 UpgradePod 失败后不重放，
+// 因为它们的输入变更要么改变 revision 并由 calculateStatus 复位，要么需要新 SUO。
+// 新 SUO 重置生命周期；同轮已成功的 hook 不重复执行，结果未知的 hook 不自动重放。
 func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureFuncArgs) (retErr error) {
 	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
 	isCheckpointRestore := box.Spec.UpgradePolicy != nil &&
@@ -179,10 +182,6 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 	}
 	upgradeCond.ObservedGeneration = box.Generation
 	utils.SetSandboxCondition(newStatus, *upgradeCond)
-	if IsUpgradeFailed(upgradeCond) {
-		setUpdateReady(newStatus, false, agentsv1alpha1.SandboxReadyReasonUpgrading, upgradeCond.Message)
-		return nil
-	}
 	if upgradeCond.Status == metav1.ConditionTrue {
 		return nil
 	}
@@ -211,13 +210,14 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 	// 已完成 hook 且本次观察到 Ready 时优先收敛成功；否则到期后不再执行新副作用。
 	if !time.Now().Before(progress.Deadline.Time) &&
 		!(upgradeCond.Reason == agentsv1alpha1.SandboxUpgradingReasonPostUpgrade && progress.PostUpgrade == agentsv1alpha1.SandboxUpgradeHookSucceeded && podIsReady(pod)) {
+		// 已经失败过的步骤到期后保留自己的 Failed Reason，不被默认值改写。
 		failReason := agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed
 		switch upgradeCond.Reason {
-		case agentsv1alpha1.SandboxUpgradingReasonPreUpgrade:
+		case agentsv1alpha1.SandboxUpgradingReasonPreUpgrade, agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed:
 			failReason = agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed
-		case agentsv1alpha1.SandboxUpgradingReasonPostUpgrade:
+		case agentsv1alpha1.SandboxUpgradingReasonPostUpgrade, agentsv1alpha1.SandboxUpgradingReasonPostUpgradeFailed:
 			failReason = agentsv1alpha1.SandboxUpgradingReasonPostUpgradeFailed
-		case agentsv1alpha1.SandboxUpgradingReasonCheckpointing:
+		case agentsv1alpha1.SandboxUpgradingReasonCheckpointing, agentsv1alpha1.SandboxUpgradingReasonCheckpointFailed:
 			failReason = agentsv1alpha1.SandboxUpgradingReasonCheckpointFailed
 		}
 		r.failUpgrade(args, upgradeCond, failReason, "upgrade deadline exceeded; automatic execution stopped: "+inplaceWaitMessage(pod))
@@ -226,6 +226,11 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 	ctx, cancel := context.WithDeadline(ctx, progress.Deadline.Time)
 	defer cancel()
 
+	// hook 失败与它自己的步骤共用分支：hook 的输入是 spec.lifecycle，用户修脚本就是修这一
+	// 步的输入，下一次 reconcile 应当重试，只有预算到期才停下。
+	// Checkpointing 和 UpgradePod 的失败不在此列：它们的输入是 spec.template（改动会变
+	// revision，由 calculateStatus 复位）和 upgradePolicy（按契约需提交新 SUO），同 UID 内
+	// 改变目标不得重放旧轮次。
 	switch upgradeCond.Reason {
 	// When upgrading a paused Sandbox, it must first be resumed successfully,
 	// then upgraded, and finally paused again.
@@ -269,7 +274,7 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 		}
 		klog.InfoS("Waiting for template patch after resume", "sandbox", klog.KObj(box))
 		return nil
-	case agentsv1alpha1.SandboxUpgradingReasonPreUpgrade:
+	case agentsv1alpha1.SandboxUpgradingReasonPreUpgrade, agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed:
 		// 在前置 hook 产生副作用前完成能静态确定的原地更新校验。
 		if RequiresInplaceUpgrade(box) && pod != nil {
 			if _, err := validateInplaceUpdate(pod, box); err != nil {
@@ -340,7 +345,7 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 		upgradeCond.Message = ""
 		utils.SetSandboxCondition(newStatus, *upgradeCond)
 		fallthrough
-	case agentsv1alpha1.SandboxUpgradingReasonPostUpgrade:
+	case agentsv1alpha1.SandboxUpgradingReasonPostUpgrade, agentsv1alpha1.SandboxUpgradingReasonPostUpgradeFailed:
 		args.Pod = pod
 		result, err := r.runUpgradeHook(ctx, args, false)
 		if err != nil {
@@ -386,19 +391,6 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 	return nil
 }
 
-// IsUpgradeFailed 识别真正终止状态；普通等待和可重试写入错误不使用 Failed Reason。
-func IsUpgradeFailed(cond *metav1.Condition) bool {
-	if cond == nil || cond.Status != metav1.ConditionFalse {
-		return false
-	}
-	switch cond.Reason {
-	case agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed, agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed,
-		agentsv1alpha1.SandboxUpgradingReasonPostUpgradeFailed, agentsv1alpha1.SandboxUpgradingReasonCheckpointFailed:
-		return true
-	}
-	return false
-}
-
 func (r *UpgradeControl) failUpgrade(args EnsureFuncArgs, cond *metav1.Condition, reason, msg string) {
 	previous := utils.GetSandboxCondition(&args.Box.Status, string(agentsv1alpha1.SandboxConditionUpgrading))
 	report := previous == nil || previous.Status != metav1.ConditionFalse || previous.Reason != reason ||
@@ -413,6 +405,8 @@ func (r *UpgradeControl) failUpgrade(args EnsureFuncArgs, cond *metav1.Condition
 }
 
 // hook 执行前落盘 Running。成功结果若未持久化，下一次按结果未知停止，而非重复副作用。
+// 确定的失败（hook 跑完且退出码非 0，或 Pod 缺失导致根本未执行）清除标记并落盘，
+// 用户修正后可在预算内重试；只有执行通道本身报错才保留 Running 并停止自动重放。
 func (r *UpgradeControl) runUpgradeHook(ctx context.Context, args EnsureFuncArgs, pre bool) (upgradeActionResult, error) {
 	progress := args.NewStatus.UpgradeProgress
 	mark := &progress.PostUpgrade
@@ -450,6 +444,16 @@ func (r *UpgradeControl) runUpgradeHook(ctx context.Context, args EnsureFuncArgs
 		if err := r.persistUpgradeProgress(ctx, args); err != nil {
 			*mark = agentsv1alpha1.SandboxUpgradeHookRunning
 			return upgradeActionResult{}, fmt.Errorf("cannot persist hook success: %w", err)
+		}
+		return result, nil
+	}
+	if result.Conclusive {
+		// 已知失败不是结果未知：清除标记并落盘，使下一次 reconcile 能在预算内重试。
+		// 清除未落盘时保持与存储一致的 Running，并交由外层重试，不能按可重试向上报。
+		*mark = ""
+		if err := r.persistUpgradeProgress(ctx, args); err != nil {
+			*mark = agentsv1alpha1.SandboxUpgradeHookRunning
+			return upgradeActionResult{}, fmt.Errorf("cannot persist hook failure: %w", err)
 		}
 	}
 	return result, nil
@@ -752,7 +756,10 @@ func podContainersRunning(pod *corev1.Pod) bool {
 // upgradeActionResult represents the result of executing an upgrade hook.
 type upgradeActionResult struct {
 	Succeeded bool
-	Message   string
+	// Conclusive 表示本次结果是确定的：hook 跑完并给出了退出码，或根本没有执行。
+	// 只有执行通道本身报错时结果未知，此时不能重试，否则可能重复已产生的副作用。
+	Conclusive bool
+	Message    string
 }
 
 // executeUpgradeAction executes an upgrade action and returns the result.
@@ -760,22 +767,23 @@ type upgradeActionResult struct {
 // If pod is nil and action is configured, it returns failure.
 func (r *UpgradeControl) executeUpgradeAction(ctx context.Context, pod *corev1.Pod, box *agentsv1alpha1.Sandbox, action *agentsv1alpha1.UpgradeAction) upgradeActionResult {
 	if action == nil {
-		return upgradeActionResult{Succeeded: true, Message: "no hook configured, skipped"}
+		return upgradeActionResult{Succeeded: true, Conclusive: true, Message: "no hook configured, skipped"}
 	}
 	if pod == nil {
-		return upgradeActionResult{Succeeded: false, Message: "pod not found, cannot execute hook"}
+		return upgradeActionResult{Succeeded: false, Conclusive: true, Message: "pod not found, cannot execute hook"}
 	}
 
 	exitCode, stdout, stderr, err := r.lifecycleHookFunc(ctx, box, action)
 	if err != nil {
+		// 执行通道报错，hook 可能已部分执行，结果未知。
 		msg := fmt.Sprintf("hook execution error: %v, stderr: %s, stdout: %s", err, stderr, stdout)
 		return upgradeActionResult{Succeeded: false, Message: utils.TruncateConditionMessage(msg)}
 	}
 	if exitCode != 0 {
 		msg := fmt.Sprintf("hook failed with exit code %d, stderr: %s, stdout: %s", exitCode, stderr, stdout)
-		return upgradeActionResult{Succeeded: false, Message: utils.TruncateConditionMessage(msg)}
+		return upgradeActionResult{Succeeded: false, Conclusive: true, Message: utils.TruncateConditionMessage(msg)}
 	}
-	return upgradeActionResult{Succeeded: true, Message: fmt.Sprintf("hook succeeded, stdout: %s", stdout)}
+	return upgradeActionResult{Succeeded: true, Conclusive: true, Message: fmt.Sprintf("hook succeeded, stdout: %s", stdout)}
 }
 
 // hasUpgradeAction checks if the sandbox has a non-empty upgrade action configured.

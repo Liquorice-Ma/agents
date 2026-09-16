@@ -294,6 +294,8 @@ func TestEnsureSandboxUpgraded(t *testing.T) {
 		TimeoutSeconds: 30,
 	}
 	now := metav1.Now()
+	// 供「失败后在预算内重试」用例统计 hook 实际执行次数。
+	retryHookCalls := 0
 
 	tests := []struct {
 		name            string
@@ -304,6 +306,9 @@ func TestEnsureSandboxUpgraded(t *testing.T) {
 		expectErr       bool
 		expectPhase     agentsv1alpha1.SandboxPhase
 		expectCondition map[string]metav1.ConditionStatus
+		// hookCalls 非空时校验 hook 被调用的次数，用于区分重试与停止重放。
+		hookCalls       *int
+		expectHookCalls int
 	}{
 		{
 			name: "no lifecycle configured skips preUpgrade and proceeds to Phase 2",
@@ -386,23 +391,28 @@ func TestEnsureSandboxUpgraded(t *testing.T) {
 			},
 		},
 		{
-			name: "preUpgrade failed stops without replay",
+			name: "preUpgrade failed retries within budget",
 			pod:  newRunningPod(),
 			box: newUpgradeTestSandbox(&agentsv1alpha1.SandboxLifecycle{
 				PreUpgrade: preUpgradeHook,
 			}, nil),
-			// 同轮已有失败 Condition，不再自动调用 hook。
+			// 上一轮已失败，但预算未耗尽：本轮重新执行 hook，仍失败则保持 PreUpgradeFailed。
 			existingStatus: &agentsv1alpha1.SandboxStatus{
 				Phase:      agentsv1alpha1.SandboxUpgrading,
 				Conditions: []metav1.Condition{{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Status: metav1.ConditionFalse, Reason: agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed}},
 			},
-			mockHookFunc: mockLifecycleHookFunc(1, "", "still failing", nil),
-			expectErr:    false,
-			expectPhase:  agentsv1alpha1.SandboxUpgrading,
+			mockHookFunc: func(context.Context, *agentsv1alpha1.Sandbox, *agentsv1alpha1.UpgradeAction) (int32, string, string, error) {
+				retryHookCalls++
+				return 1, "", "still failing", nil
+			},
+			expectErr:   false,
+			expectPhase: agentsv1alpha1.SandboxUpgrading,
 			expectCondition: map[string]metav1.ConditionStatus{
 				string(agentsv1alpha1.SandboxConditionReady):     metav1.ConditionFalse,
 				string(agentsv1alpha1.SandboxConditionUpgrading): metav1.ConditionFalse,
 			},
+			hookCalls:       &retryHookCalls,
+			expectHookCalls: 1,
 		},
 		{
 			name: "delete pod after preUpgrade succeeded (Phase 2)",
@@ -544,7 +554,7 @@ func TestEnsureSandboxUpgraded(t *testing.T) {
 					},
 				},
 			},
-			// 已失败的 PostUpgrade 停止同轮自动重放。
+			// 已失败的 PostUpgrade 在预算内重新执行，仍失败则保持 PostUpgradeFailed。
 			mockHookFunc: mockLifecycleHookFunc(1, "", "still failing", nil),
 			expectErr:    false,
 			expectPhase:  agentsv1alpha1.SandboxUpgrading,
@@ -793,6 +803,10 @@ func TestEnsureSandboxUpgraded(t *testing.T) {
 					t.Errorf("Expected Upgrading condition to exist during in-progress upgrade, but it was removed")
 				}
 			}
+
+			if tt.hookCalls != nil {
+				require.Equal(t, tt.expectHookCalls, *tt.hookCalls, "hook 实际执行次数与预期不符")
+			}
 		})
 	}
 }
@@ -926,11 +940,13 @@ func TestUpgradeHookPersistence(t *testing.T) {
 			name, mark                     string
 			failPatch, exitCode, wantCalls int
 			wantErr, wantSuccess           bool
+			// retryable 表示确定失败已清除标记，重启后仍允许在预算内重跑。
+			retryable bool
 		}{
 			{name: "success persists and skips replay", wantCalls: 1, wantSuccess: true},
 			{name: "already succeeded", mark: "Succeeded", wantSuccess: true},
 			{name: "unknown result stops", mark: "Running"},
-			{name: "explicit failure stops", exitCode: 1, wantCalls: 1},
+			{name: "explicit failure allows retry", exitCode: 1, wantCalls: 1, retryable: true},
 			{name: "intent write fails before execution", failPatch: 1, wantErr: true},
 			{name: "success write fails after execution", failPatch: 2, wantCalls: 1, wantErr: true},
 		} {
@@ -984,14 +1000,21 @@ func TestUpgradeHookPersistence(t *testing.T) {
 					require.Empty(t, *mark)
 					return
 				}
-				// 从存储恢复，不依赖首次调用的内存标记，验证重启后不会重复执行。
+				// 从存储恢复，不依赖首次调用的内存标记，验证重启后的重跑判定。
 				args.Box = stored
 				args.NewStatus = stored.Status.DeepCopy()
 				replay, err := control.upgradeControl.runUpgradeHook(t.Context(), args, pre)
 				require.NoError(t, err)
 				require.Equal(t, tt.wantSuccess, replay.Succeeded)
-				require.Equal(t, tt.wantCalls, calls)
-				if !tt.wantSuccess {
+				wantReplayCalls := tt.wantCalls
+				if tt.retryable {
+					// 确定失败已把标记清回空并落盘，因此本次会真的重新执行 hook。
+					wantReplayCalls++
+				}
+				require.Equal(t, wantReplayCalls, calls)
+				if tt.retryable {
+					require.Contains(t, replay.Message, "exit code")
+				} else if !tt.wantSuccess {
 					require.Contains(t, replay.Message, "unknown")
 				}
 			})
@@ -1521,7 +1544,8 @@ func TestInplaceUpgradeFailedRecovery(t *testing.T) {
 		err := ctrl.EnsureSandboxUpgraded(t.Context(), args)
 		require.NoError(t, err)
 		require.NoError(t, ctrl.Get(t.Context(), client.ObjectKeyFromObject(pod), &corev1.Pod{}))
-		require.True(t, IsUpgradeFailed(utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))))
+		require.Equal(t, agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed,
+			utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading)).Reason)
 
 		// 模拟新 UID 接纳后的状态；首轮只创建预算，下一轮才删除旧 Pod。
 		box.Annotations[agentsv1alpha1.AnnotationUpgradeOperation] = "replacement-operation"
@@ -1563,7 +1587,8 @@ func TestInplaceUpgradeFailedRecovery(t *testing.T) {
 		args := EnsureFuncArgs{Pod: pod, Box: box, NewStatus: newStatus}
 		prepareUpgradeStepTest(t, ctrl.Client, args)
 		require.NoError(t, ctrl.EnsureSandboxUpgraded(t.Context(), args))
-		require.True(t, IsUpgradeFailed(utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))))
+		require.Equal(t, agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed,
+			utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading)).Reason)
 		box.Annotations[agentsv1alpha1.AnnotationUpgradeOperation] = "rollback-operation"
 		utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
 		newStatus.UpgradeProgress = nil
