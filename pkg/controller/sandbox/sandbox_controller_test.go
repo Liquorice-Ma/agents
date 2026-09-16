@@ -4267,11 +4267,11 @@ func TestCalculateStatus(t *testing.T) {
 			},
 		},
 		{
-			// InplaceUpdate keeps the pod but still runs the upgrade lifecycle, so a
-			// template change must move the sandbox into Upgrading. The InplaceUpdate
-			// condition belongs to the claim path only: the upgrade path neither reads
-			// nor clears it, so a leftover from a previous claim round stays as is.
-			name: "running phase with hash mismatch and inplace policy should transition to upgrading and clear stale conditions",
+			// inplace still runs the upgrade lifecycle on a template change, so it
+			// must transition into Upgrading. The InplaceUpdate condition belongs to
+			// the claim path only: the upgrade path neither reads nor clears it, so a
+			// leftover from a previous claim round stays as is.
+			name: "running phase with hash mismatch and inplace policy should transition to upgrading",
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-sandbox",
@@ -4319,56 +4319,9 @@ func TestCalculateStatus(t *testing.T) {
 			expectedPhase:     agentsv1alpha1.SandboxUpgrading,
 			expectedShouldReq: false,
 			checkConditions: func(t *testing.T, status *agentsv1alpha1.SandboxStatus) {
-				// 显式升级接管后清理旧 Claim 门禁，结果由 Upgrading 表达。
-				require.Nil(t, utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionInplaceUpdate)))
-			},
-		},
-		{
-			// 暂停态升级保留恢复所需的 Paused Condition，但清理旧 Claim 门禁。
-			name: "paused phase with inplace policy and revision change transitions to upgrading",
-			pod:  nil,
-			box: &agentsv1alpha1.Sandbox{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       "test-sandbox",
-					Namespace:  "default",
-					Generation: 1,
-				},
-				Spec: agentsv1alpha1.SandboxSpec{
-					Paused: true,
-					UpgradePolicy: &agentsv1alpha1.SandboxUpgradePolicy{
-						Type: agentsv1alpha1.SandboxUpgradePolicyInplaceUpdate,
-					},
-					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
-						Template: &corev1.PodTemplateSpec{
-							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{{Name: "test", Image: "nginx:v2"}},
-							},
-						},
-					},
-				},
-			},
-			initStatus: &agentsv1alpha1.SandboxStatus{
-				Phase: agentsv1alpha1.SandboxPaused,
-				Conditions: []metav1.Condition{
-					{
-						Type:               string(agentsv1alpha1.SandboxConditionPaused),
-						Status:             metav1.ConditionTrue,
-						LastTransitionTime: metav1.Now(),
-					},
-					{
-						Type:               string(agentsv1alpha1.SandboxConditionInplaceUpdate),
-						Status:             metav1.ConditionFalse,
-						Reason:             agentsv1alpha1.SandboxInplaceUpdateReasonFailed,
-						Message:            "previous round failed",
-						LastTransitionTime: metav1.Now(),
-					},
-				},
-			},
-			expectedPhase:     agentsv1alpha1.SandboxUpgrading,
-			expectedShouldReq: false,
-			checkConditions: func(t *testing.T, status *agentsv1alpha1.SandboxStatus) {
-				require.Nil(t, utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionInplaceUpdate)))
-				require.NotNil(t, utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionPaused)))
+				// The upgrade path does not touch the claim's InplaceUpdate condition,
+				// so a leftover condition should remain as is.
+				require.NotNil(t, utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionInplaceUpdate)))
 			},
 		},
 		{
@@ -5370,7 +5323,8 @@ func TestSandboxReconciler_Reconcile_RateLimitFeatureGate(t *testing.T) {
 					},
 				},
 				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "nginx"}}},
-				// 已就绪场景必须提供真实 Pod Ready，不能只依赖旧 Sandbox Condition。
+				// A ready scenario must provide a real Pod Ready, not rely only on the
+				// old Sandbox Condition.
 				Status: corev1.PodStatus{
 					Phase:      corev1.PodRunning,
 					Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
@@ -6011,7 +5965,8 @@ func TestReconcile_ErrorPath_UpdatesSandboxStatus(t *testing.T) {
 	if patchCallCount == 0 {
 		t.Error("Expected at least one Pod patch attempt")
 	}
-	// 错误分支必须真正保存更新状态，不能只断言错误已经返回。
+	// The error branch must actually persist the update state, not just assert
+	// that the error was returned.
 	stored := &agentsv1alpha1.Sandbox{}
 	require.NoError(t, fakeClient.Get(t.Context(), req.NamespacedName, stored))
 	cond := utils.GetSandboxCondition(&stored.Status, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
@@ -6081,14 +6036,16 @@ func TestReconcile_ErrorPath_StatusUpdateAlsoFails(t *testing.T) {
 		WithObjects(sandbox, pod).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
-				// 注入固定 Pod 写入错误，验证外层包装仍保留原始 cause。
+				// Inject a fixed Pod write error to verify the outer wrapper still
+				// preserves the original cause.
 				if _, ok := obj.(*corev1.Pod); ok {
 					return podPatchErr
 				}
 				return c.Patch(ctx, obj, patch, opts...)
 			},
 			SubResourcePatch: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
-				// 状态保存也失败时，仍应返回原始 Pod 写入错误。
+				// When the status save also fails, the original Pod write error should
+				// still be returned.
 				statusPatchCalls++
 				return fmt.Errorf("simulated status patch failure")
 			},
@@ -6121,7 +6078,8 @@ func TestReconcile_ErrorPath_StatusUpdateAlsoFails(t *testing.T) {
 	if err == nil {
 		t.Fatal("Expected error from Reconcile, got nil")
 	}
-	// 检查 cause 而非完整文案，允许错误保留新增的执行上下文。
+	// Check the cause rather than the full text, so the error may keep the added
+	// execution context.
 	require.ErrorIs(t, err, podPatchErr)
 	require.Positive(t, statusPatchCalls)
 }

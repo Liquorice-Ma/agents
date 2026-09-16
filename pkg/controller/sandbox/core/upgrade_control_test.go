@@ -133,7 +133,7 @@ func newTestCommonControl(hookFunc LifecycleHookFunc, objects ...client.Object) 
 	return control
 }
 
-// prepareUpgradeStepTest 将 Sandbox 预置到 fake client，供 EnsureSandboxUpgraded 后续补丁使用。
+// prepareUpgradeStepTest seeds the Sandbox into the fake client for later patches by EnsureSandboxUpgraded.
 func prepareUpgradeStepTest(t *testing.T, c client.Client, args EnsureFuncArgs) {
 	t.Helper()
 	stored := &agentsv1alpha1.Sandbox{}
@@ -285,7 +285,7 @@ func TestEnsureSandboxUpgraded(t *testing.T) {
 		TimeoutSeconds: 30,
 	}
 	now := metav1.Now()
-	// 供「失败后重试」用例统计 hook 实际执行次数。
+	// Counts the actual hook executions for the "retry after failure" cases.
 	retryHookCalls := 0
 
 	tests := []struct {
@@ -297,7 +297,8 @@ func TestEnsureSandboxUpgraded(t *testing.T) {
 		expectErr       bool
 		expectPhase     agentsv1alpha1.SandboxPhase
 		expectCondition map[string]metav1.ConditionStatus
-		// hookCalls 非空时校验 hook 被调用的次数，用于区分重试与停止重放。
+		// When hookCalls is non-nil, verify how many times the hook was called, to
+		// distinguish retry from stopping replay.
 		hookCalls       *int
 		expectHookCalls int
 	}{
@@ -387,7 +388,8 @@ func TestEnsureSandboxUpgraded(t *testing.T) {
 			box: newUpgradeTestSandbox(&agentsv1alpha1.SandboxLifecycle{
 				PreUpgrade: preUpgradeHook,
 			}, nil),
-			// 上一轮已失败：本轮重新执行 hook，仍失败则保持 PreUpgradeFailed。
+			// Previous round already failed: this round re-runs the hook, and if it
+			// still fails it stays PreUpgradeFailed.
 			existingStatus: &agentsv1alpha1.SandboxStatus{
 				Phase:      agentsv1alpha1.SandboxUpgrading,
 				Conditions: []metav1.Condition{{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Status: metav1.ConditionFalse, Reason: agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed}},
@@ -545,7 +547,8 @@ func TestEnsureSandboxUpgraded(t *testing.T) {
 					},
 				},
 			},
-			// 已失败的 PostUpgrade 重新执行，仍失败则保持 PostUpgradeFailed。
+			// An already-failed PostUpgrade re-runs, and if it still fails it stays
+			// PostUpgradeFailed.
 			mockHookFunc: mockLifecycleHookFunc(1, "", "still failing", nil),
 			expectErr:    false,
 			expectPhase:  agentsv1alpha1.SandboxUpgrading,
@@ -772,7 +775,7 @@ func TestEnsureSandboxUpgraded(t *testing.T) {
 			}
 
 			if tt.hookCalls != nil {
-				require.Equal(t, tt.expectHookCalls, *tt.hookCalls, "hook 实际执行次数与预期不符")
+				require.Equal(t, tt.expectHookCalls, *tt.hookCalls, "actual hook call count does not match expectation")
 			}
 		})
 	}
@@ -805,7 +808,8 @@ func TestEnsureInplaceUpgrade(t *testing.T) {
 			name: "inplace upgrade - update done transitions to Running",
 			pod: func() *corev1.Pod {
 				p := newRunningPod()
-				// spec、实际镜像与目标一致，且 Pod Ready，才能完成生命周期。
+				// spec, actual image and target match, and the Pod is Ready, so the
+				// lifecycle can complete.
 				p.Spec.Containers[0].Image = "test:v2"
 				p.Status.ContainerStatuses[0].Image = "test:v2"
 				p.Labels[agentsv1alpha1.PodLabelTemplateHash] = "new-revision"
@@ -835,10 +839,12 @@ func TestEnsureInplaceUpgrade(t *testing.T) {
 			name: "inplace upgrade - update in progress stays Upgrading",
 			pod: func() *corev1.Pod {
 				p := newRunningPod()
-				// spec 已下发，但容器尚未切换到目标镜像。
+				// spec is delivered, but the container has not yet switched to the
+				// target image.
 				p.Spec.Containers[0].Image = "test:v2"
 				p.Labels[agentsv1alpha1.PodLabelTemplateHash] = "new-revision"
-				// 保留旧 ImageID，验证配置生效等待不误报成功。
+				// Keep the old ImageID to verify the wait for configuration effect does
+				// not falsely report success.
 				if p.Annotations == nil {
 					p.Annotations = map[string]string{}
 				}
@@ -864,7 +870,8 @@ func TestEnsureInplaceUpgrade(t *testing.T) {
 			},
 			mockHookFunc: mockLifecycleHookFunc(0, "", "", nil),
 			expectErr:    false,
-			// 正常等待时 Ready 跟随 Pod，但 Upgrading 不能提前成功。
+			// During a normal wait, Ready follows the Pod, but Upgrading must not
+			// succeed early.
 			expectPhase: agentsv1alpha1.SandboxUpgrading,
 			expectCondition: map[string]metav1.ConditionStatus{
 				string(agentsv1alpha1.SandboxConditionReady):     metav1.ConditionTrue,
@@ -1230,18 +1237,21 @@ func TestExecuteUpgradePodStep_Branches(t *testing.T) {
 	}
 }
 
-// 新操作已接纳后，即使旧镜像还在退避，也能通过 inplace 下发正确镜像。
-// 回到原镜像时允许 ImageID 不变，但必须观察目标容器运行并等待最终 Ready。
+// After a new operation is accepted, even if the old image is still backing
+// off, the correct image can be delivered via inplace. When rolling back to the
+// original image, the ImageID is allowed to stay unchanged, but the target
+// container must be observed running and the final Ready awaited.
 func TestInplaceUpgradeRollbackWhileStuck(t *testing.T) {
 	box := newUpgradeTestSandbox(nil, &agentsv1alpha1.SandboxUpgradePolicy{
 		Type: agentsv1alpha1.SandboxUpgradePolicyInplaceUpdate,
 	})
-	// 新 SUO 将模板回退到原镜像。
+	// The new SUO rolls the template back to the original image.
 	box.Spec.Template.Spec.Containers[0].Image = "test:v1"
 	_, h := HashSandbox(box)
 	box.Annotations[agentsv1alpha1.SandboxHashImmutablePart] = h
 
-	// 旧镜像未拉取成功，Pod 尚未 Ready，且 ImageID 仍为原基线。
+	// The old image was not pulled successfully, the Pod is not Ready yet, and the
+	// ImageID is still the original baseline.
 	pod := newRunningPod()
 	pod.UID = "preserved-pod"
 	pod.Status.Conditions[0].Status = corev1.ConditionFalse
@@ -1260,7 +1270,7 @@ func TestInplaceUpgradeRollbackWhileStuck(t *testing.T) {
 	}}
 
 	ctrl := newTestUpgradeControlForInplace(pod.DeepCopy())
-	// 新操作目标是旧 Pod 原先使用的镜像。
+	// The new operation targets the image the old Pod originally used.
 	newStatus := &agentsv1alpha1.SandboxStatus{
 		Phase:          agentsv1alpha1.SandboxUpgrading,
 		UpdateRevision: "old-revision",
@@ -1278,7 +1288,7 @@ func TestInplaceUpgradeRollbackWhileStuck(t *testing.T) {
 	err := ctrl.EnsureSandboxUpgraded(context.TODO(), EnsureFuncArgs{Pod: pod, Box: box, NewStatus: newStatus})
 	assert.NoError(t, err)
 
-	// 正确目标已下发，Pod 不被删除重建。
+	// The correct target is delivered; the Pod is not deleted and recreated.
 	var patched corev1.Pod
 	require.NoError(t, ctrl.Get(t.Context(), client.ObjectKeyFromObject(pod), &patched))
 	require.Equal(t, "test:v1", patched.Spec.Containers[0].Image)
@@ -1288,14 +1298,16 @@ func TestInplaceUpgradeRollbackWhileStuck(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, state)
 	require.Equal(t, "test:v1", state.LastContainerStatuses["sandbox"].TargetImage)
-	// 下发不代表生效；仍将真实退避原因写入 Message。
+	// Delivery does not mean it took effect; the real backoff reason is still
+	// written into Message.
 	c := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
 	if assert.NotNil(t, c) {
 		assert.Equal(t, agentsv1alpha1.SandboxUpgradingReasonUpgradePod, c.Reason)
 		assert.Contains(t, c.Message, "ImagePullBackOff", "the wait reason must be surfaced on the Upgrading condition")
 	}
 
-	// 同一个 ImageID 重新运行目标镜像后，配置阶段完成，仍等待 Pod Ready。
+	// After the same ImageID reruns the target image, the configuration step is
+	// complete but it still waits for Pod Ready.
 	patched.Status.ContainerStatuses[0].Image = "test:v1"
 	patched.Status.ContainerStatuses[0].State = corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
 	args := EnsureFuncArgs{Pod: &patched, Box: box, NewStatus: newStatus}
@@ -1986,7 +1998,8 @@ func TestPerformRecreateUpgrade_CheckpointRestore_MissingCheckpointID(t *testing
 		},
 	}
 
-	// 直接准备已进入 UpgradePod 的持久化进度，验证创建路径的错误。
+	// Directly prepare persisted progress that has already entered UpgradePod, to
+	// verify the error on the create path.
 	prepareUpgradeStepTest(t, control.Client, EnsureFuncArgs{Box: box, NewStatus: newStatus})
 	err := control.EnsureSandboxUpgraded(context.TODO(), EnsureFuncArgs{
 		Pod:       nil,

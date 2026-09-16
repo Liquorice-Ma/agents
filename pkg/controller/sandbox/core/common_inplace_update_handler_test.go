@@ -180,7 +180,8 @@ func TestHandleInPlaceUpdateCommon(t *testing.T) {
 			},
 			expectedResult: true,
 			expectError:    false,
-			// 不支持的模板变更通过 InplaceUpdate 呈现，Ready 仍反映旧 Pod 健康状态。
+			// An unsupported template change is surfaced via InplaceUpdate, while
+			// Ready still reflects the old Pod's health.
 			checkStatus: func(t *testing.T, status *agentsv1alpha1.SandboxStatus) {
 				cond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
 				if cond == nil {
@@ -223,7 +224,7 @@ func TestHandleInPlaceUpdateCommon(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:        "test-sandbox",
 					Namespace:   "default",
-					Annotations: map[string]string{}, // 无不可变字段 hash 记录
+					Annotations: map[string]string{}, // no immutable-field hash record
 				},
 				Spec: agentsv1alpha1.SandboxSpec{
 					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
@@ -668,9 +669,10 @@ func TestHandleInPlaceUpdateCommon_UnsupportedResizeReason(t *testing.T) {
 		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch,
 			opts ...client.PatchOption) error {
 			data, _ := patch.Data(obj)
-			// 直接资源 patch 携带 spec.containers[].resources；集群未开启
-			// InPlacePodVerticalScaling 特性时，服务端对该字段更新返回 Invalid(422)，
-			// 生产代码据此判定为 resize 不被支持。元数据/状态 patch 不含 spec，放行。
+			// A direct resource patch carries spec.containers[].resources; when the
+			// cluster has not enabled the InPlacePodVerticalScaling feature, the server
+			// returns Invalid(422) for that field update, and production code treats it
+			// as an unsupported resize. Metadata/status patches carry no spec and pass.
 			if strings.Contains(string(data), `"spec"`) {
 				return apierrors.NewInvalid(schema.GroupKind{Kind: "Pod"}, obj.GetName(), nil)
 			}
@@ -714,7 +716,8 @@ func TestHandleInPlaceUpdateCommon_UnsupportedResizeReason(t *testing.T) {
 func TestHandleInPlaceUpdateCommon_ResizeInfeasibleFailFast(t *testing.T) {
 	ctx := context.Background()
 
-	// 当前 generation 的资源调整被 kubelet 明确拒绝，应终止本轮。
+	// A resource adjustment for the current generation is explicitly rejected by
+	// kubelet, so this round should terminate.
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-pod",
@@ -878,7 +881,8 @@ func TestHandleInPlaceUpdateCommon_TerminalFailureNotOverwritten(t *testing.T) {
 		},
 	}
 
-	// 当前 generation、同 revision 已失败，不能被旧配置生效覆盖。
+	// Current generation, same revision has already failed and must not be
+	// overwritten by an old configuration taking effect.
 	box.Status.UpdateRevision = "target-revision"
 	newStatus := &agentsv1alpha1.SandboxStatus{
 		UpdateRevision: "target-revision",
@@ -1014,7 +1018,8 @@ func buildMatchingHashBox(name, ns string, podSpec corev1.PodSpec) *agentsv1alph
 }
 
 func TestHandleInPlaceUpdateCommon_RevisionMatchCompletedSucceeded(t *testing.T) {
-	// 配置已生效且 Pod Ready，Claim 才能报告成功。
+	// The Claim can only report success once the configuration takes effect and
+	// the Pod is Ready.
 	ctx := context.Background()
 
 	podSpec := corev1.PodSpec{
@@ -1033,7 +1038,7 @@ func TestHandleInPlaceUpdateCommon_RevisionMatchCompletedSucceeded(t *testing.T)
 			Labels: map[string]string{
 				agentsv1alpha1.PodLabelTemplateHash: "target-rev",
 			},
-			// 无原地更新状态记录，配置已生效。
+			// no in-place update state record; the configuration already took effect.
 		},
 		Spec:   podSpec,
 		Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},
@@ -1077,7 +1082,8 @@ func TestHandleInPlaceUpdateCommon_RevisionMatchCompletedSucceeded(t *testing.T)
 }
 
 func TestHandleInPlaceUpdateCommon_AlreadySucceededIdempotent(t *testing.T) {
-	// 已成功的配置继续观察 Pod Ready；健康未变时保持成功。
+	// An already-succeeded configuration keeps observing Pod Ready; success is
+	// kept when health is unchanged.
 	ctx := context.Background()
 
 	podSpec := corev1.PodSpec{
@@ -1157,7 +1163,8 @@ func TestHandleInPlaceUpdateCommon_RevisionMatchImageUpdateInProgress(t *testing
 			ContainerStatuses: []corev1.ContainerStatus{{
 				Name:    "main",
 				ImageID: "old-image-id", // Same as old, not updated yet
-				// 容器创建和镜像拉取退避均继续等待，不自动认定终止失败。
+				// Container creation and image pull backoff both keep waiting, without
+				// automatically concluding a terminal failure.
 				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
 					Reason:  "ContainerCreating",
 					Message: `pulling image "nginx:latest"`,
@@ -1437,7 +1444,8 @@ func TestHandleInPlaceUpdateCommon_StateNotNilNotCompletedTerminalErr(t *testing
 }
 
 func TestHandleInPlaceUpdateCommon_ImagePullFailureAcceptsCorrectedTarget(t *testing.T) {
-	// 错误镜像不阻止新目标下发，继续使用同一 Pod 完成原地补救。
+	// A bad image does not block delivering a new target; the same Pod continues
+	// to be used to complete the in-place remediation.
 	ctx := context.Background()
 
 	scheme := runtime.NewScheme()
@@ -1506,7 +1514,8 @@ func TestHandleInPlaceUpdateCommon_ImagePullFailureAcceptsCorrectedTarget(t *tes
 		t.Error("Expected result false (corrected target in progress), got true")
 	}
 
-	// 新目标和状态记录已下发，旧拉取失败不会锁死本轮。
+	// The new target and state record have been delivered; the old pull failure
+	// does not lock up this round.
 	updated := &corev1.Pod{}
 	if err := fakeClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: "test-pod"}, updated); err != nil {
 		t.Fatalf("Failed to get pod: %v", err)
@@ -1524,7 +1533,8 @@ func TestHandleInPlaceUpdateCommon_ImagePullFailureAcceptsCorrectedTarget(t *tes
 }
 
 func TestHandleInPlaceUpdateCommon_ImagePullBackoffWaits(t *testing.T) {
-	// 拉取退避仍属于等待，Claim 超时由原有调用链处理。
+	// Pull backoff is still a wait; the Claim timeout is handled by the existing
+	// call chain.
 	ctx := context.Background()
 
 	scheme := runtime.NewScheme()
@@ -1777,11 +1787,12 @@ func TestHandleInPlaceUpdateCommon_NoChangeReturnsTrue(t *testing.T) {
 	}
 	pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
 
-	// 使用返回空 patch 的回调验证无配置变更。
+	// Use a callback that returns an empty patch to verify there is no
+	// configuration change.
 	recorder := createTestRecorder()
 	handler := &MockInPlaceUpdateHandler{
 		control: inplaceupdate.NewInPlaceUpdateControl(fakeClient, func(opts inplaceupdate.InPlaceUpdateOptions) (string, error) {
-			return "", nil // 无需 patch
+			return "", nil // no patch needed
 		}),
 		recorder: recorder,
 		logger:   logr.Discard(),
@@ -1798,7 +1809,8 @@ func TestHandleInPlaceUpdateCommon_NoChangeReturnsTrue(t *testing.T) {
 }
 
 func TestHandleInPlaceUpdateCommon_MetadataOnlyChange(t *testing.T) {
-	// 仅 metadata 变更也通过统一结果通道报告，Pod Ready 后成功。
+	// A metadata-only change is also reported through the unified result channel,
+	// succeeding once the Pod is Ready.
 	ctx := context.Background()
 
 	scheme := runtime.NewScheme()
@@ -1830,7 +1842,7 @@ func TestHandleInPlaceUpdateCommon_MetadataOnlyChange(t *testing.T) {
 				agentsv1alpha1.PodLabelTemplateHash: "old-revision",
 			},
 		},
-		Spec:   podSpec, // 镜像和资源与模板一致。
+		Spec:   podSpec, // image and resources match the template.
 		Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},
 	}
 
@@ -1967,7 +1979,8 @@ func TestInplaceStepAndClaimState(t *testing.T) {
 						if failWrites && tt.writeError == "resize-conflict" {
 							return injected
 						}
-						// fake client 不实现 kubelet resize；只应用实际生成的资源 patch，不模拟生效。
+						// The fake client does not implement kubelet resize; only apply the
+						// actually generated resource patch, without simulating that it took effect.
 						return c.Patch(ctx, obj, patch)
 					},
 				})
@@ -2021,7 +2034,8 @@ func TestInplaceStepAndClaimState(t *testing.T) {
 						require.Len(t, recorder.Events, 1)
 					}
 					if tt.kind == "resize" && tt.writeError == "conflict" {
-						// C3 跨轮补齐：资源已写入但尚未生效，后续只补 metadata，不能提前成功。
+						// C3 cross-round completion: resources were written but have not yet
+						// taken effect; a later round only fills in metadata and must not succeed early.
 						current := &corev1.Pod{}
 						require.NoError(t, base.Get(t.Context(), client.ObjectKeyFromObject(pod), current))
 						require.Equal(t, box.Spec.Template.Spec.Containers[0].Resources, current.Spec.Containers[0].Resources)
@@ -2039,7 +2053,8 @@ func TestInplaceStepAndClaimState(t *testing.T) {
 						require.Equal(t, metav1.ConditionTrue, utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionReady)).Status)
 						require.NoError(t, base.Get(t.Context(), client.ObjectKeyFromObject(pod), current))
 						require.Equal(t, "target", current.Labels[agentsv1alpha1.PodLabelTemplateHash])
-						// 补写后的持久化状态仍须跟踪资源；旧配额下即使 Ready 也不能成功。
+						// The persisted state after the follow-up write must still track
+						// resources; under the old quota it cannot succeed even if Ready.
 						state, stateErr = inplaceupdate.GetPodInPlaceUpdateState(current)
 						require.NoError(t, stateErr)
 						require.NotNil(t, state)

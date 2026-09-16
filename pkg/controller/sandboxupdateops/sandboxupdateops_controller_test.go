@@ -836,7 +836,8 @@ func TestReconcile_MaxUnavailableLimitsConcurrency(t *testing.T) {
 					},
 				},
 			})
-			// 更新中和已失败对象均占用窗口；剩余两个候选不得开始新操作。
+			// Both updating and already-failed objects occupy the window; the
+			// remaining two candidates must not start a new operation.
 			sbxUpdating := newSandbox("sbx-window", "default", "test-ops", agentsv1alpha1.SandboxRunning, nil)
 			sbxUpdating.Generation = 2
 			sbxUpdating.Status.ObservedGeneration = 1
@@ -2721,7 +2722,8 @@ func TestReconcile_Phase2PatchForResumeSucceed(t *testing.T) {
 			},
 		},
 	})
-	// 已用旧模板恢复成功（ResumeSucceed）的 Sandbox，在单次 reconcile 中即可下发第二阶段模板。
+	// A Sandbox that has resumed successfully with the old template
+	// (ResumeSucceed) can deliver the phase-two template within a single reconcile.
 	sbx := newSandbox("phase-two-box", "default", "test-ops", agentsv1alpha1.SandboxUpgrading, []metav1.Condition{
 		{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Reason: agentsv1alpha1.SandboxUpgradingReasonResumeSucceed, Status: metav1.ConditionFalse},
 	})
@@ -2739,7 +2741,9 @@ func TestReconcile_Phase2PatchForResumeSucceed(t *testing.T) {
 	})
 	assert.NoError(t, err)
 
-	// 第二阶段下发模板并移除恢复触发注解，同时保留升级策略供 Sandbox Controller 驱动实际升级。
+	// Phase two patches the template and removes the resume trigger annotation,
+	// while keeping the upgrade policy for the Sandbox Controller to drive the
+	// actual upgrade.
 	updatedSbx := &agentsv1alpha1.Sandbox{}
 	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), updatedSbx))
 	assert.Equal(t, "busybox:2.0", updatedSbx.Spec.Template.Spec.Containers[0].Image,
@@ -2748,7 +2752,7 @@ func TestReconcile_Phase2PatchForResumeSucceed(t *testing.T) {
 	assert.False(t, exists, "resume trigger annotation should be removed in phase 2")
 	require.Equal(t, sbx.Spec.UpgradePolicy, updatedSbx.Spec.UpgradePolicy)
 
-	// resumeSucceed 计入 updating。
+	// resumeSucceed counts toward updating.
 	updatedOps := &agentsv1alpha1.SandboxUpdateOps{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: "test-ops", Namespace: "default"}, updatedOps))
 	assert.Equal(t, int32(1), updatedOps.Status.UpdatingReplicas,

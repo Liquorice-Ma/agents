@@ -212,8 +212,9 @@ func TestNewSandboxWaitReadyTask_UnsupportedResize_ReturnsReadyWhenSandboxUsable
 					Status:  metav1.ConditionFalse,
 					Reason:  agentsv1alpha1.SandboxInplaceUpdateReasonUnsupportedResize,
 					Message: "in-place pod resize not supported",
-					// 控制器写入 InplaceUpdate Condition 时总会盖上当前 generation，
-					// 夹具同样需要盖，否则会先被陈旧轮次门禁拦下。
+					// The controller always stamps the current generation when it
+					// writes the InplaceUpdate Condition, so the fixture must stamp it
+					// too; otherwise the stale-round guard rejects it first.
 					ObservedGeneration: 1,
 				},
 			},
@@ -239,13 +240,15 @@ func TestNewSandboxWaitReadyTask_InplaceGeneration(t *testing.T) {
 		{name: "previous success is not deliverable", generation: 1, conditionStatus: metav1.ConditionTrue, reason: agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded, wantError: "object is not satisfied"},
 		{name: "current update still waiting", generation: 2, conditionStatus: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating, wantError: "object is not satisfied"},
 		{name: "current success is deliverable", generation: 2, conditionStatus: metav1.ConditionTrue, reason: agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded},
-		// resize 不被集群支持是终态，沙箱仍可服务，不能把调用方挂到超时。
+		// An unsupported resize is a terminal state, the sandbox is still
+		// serviceable, and the caller must not be left hanging until timeout.
 		{name: "current unsupported resize is usable", generation: 2, conditionStatus: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxInplaceUpdateReasonUnsupportedResize},
 		{name: "previous unsupported resize waits for current observation", generation: 1, conditionStatus: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxInplaceUpdateReasonUnsupportedResize, wantError: "object is not satisfied"},
 		{name: "explicit upgrade ignores old claim failure", generation: 1, conditionStatus: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed, upgrade: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			// 旧 Pod 健康不代表当前 Claim 目标已经更新成功。
+			// A healthy old Pod does not mean the current Claim target has been
+			// updated successfully.
 			sbx := &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "claim-generation", Generation: 2},
 				Status: agentsv1alpha1.SandboxStatus{

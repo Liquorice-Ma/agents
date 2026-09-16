@@ -29,8 +29,10 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
-// 共享引擎只负责 Pod 更新事实；Condition、事件和最终就绪门槛由调用方处理。
-// 错误分类描述原因，不直接决定是否重试，也不证明旧 Pod 健康。
+// The shared engine only owns the Pod update facts; Conditions, events and the
+// final readiness gate are handled by the caller. The error class describes the
+// cause, does not directly decide whether to retry, and does not prove the old
+// Pod is healthy.
 type inplaceErrorClass int
 
 const (
@@ -76,7 +78,8 @@ func wrapInplaceError(class inplaceErrorClass, prefix string, cause error) *inpl
 	return &inplaceUpdateError{Class: class, msg: prefix, Cause: cause}
 }
 
-// 未分类错误也归 UpdateFailed，保留原始原因供调用方决定处置。
+// Unclassified errors also fall under UpdateFailed, keeping the original cause
+// for the caller to decide how to handle it.
 func classifyInplaceError(err error) inplaceErrorClass {
 	var ie *inplaceUpdateError
 	if errors.As(err, &ie) {
@@ -85,7 +88,8 @@ func classifyInplaceError(err error) inplaceErrorClass {
 	return inplaceClassUpdateFailed
 }
 
-// 调用方共用错误处置规则；未知写入结果先重试观察，不冒充终止失败。
+// Callers share the error-handling rules; an unknown write result is retried
+// and observed first, without pretending to be a terminal failure.
 func isTerminalInplaceError(err error) bool {
 	if classifyInplaceError(err) != inplaceClassUpdateFailed {
 		return true
@@ -99,25 +103,29 @@ func isTerminalInplaceError(err error) bool {
 		apierrors.IsBadRequest(err) || apierrors.IsMethodNotSupported(err)
 }
 
-// isUnsupportedResizeError 判断终态错误是否为 resize 不被支持，用于把
-// 通用 Failed 映射到更细的 UnsupportedResize 终态原因。
+// isUnsupportedResizeError reports whether a terminal error is an unsupported
+// resize, used to map a generic Failed to the finer-grained UnsupportedResize
+// terminal reason.
 func isUnsupportedResizeError(err error) bool {
 	var resizeErr *inplaceupdate.ResizeNotSupportedError
 	return errors.As(err, &resizeErr)
 }
 
-// 阶段在 error 非空时仍然有效；Succeeded 只表示配置生效，不表示 Pod Ready。
+// The step is still valid when error is non-nil; Succeeded only means the
+// configuration took effect, not that the Pod is Ready.
 type inplaceUpdateStepResult int
 
 const (
-	// 前置检查失败，尚未发起本次写入。
+	// Pre-check failed; this write has not been issued yet.
 	inplaceUpdateStepInProgress inplaceUpdateStepResult = iota
-	// 已尝试写入或正在等待生效，包括写入失败和部分写入成功。
+	// A write has been attempted or is waiting to take effect, including write
+	// failures and partially successful writes.
 	inplaceUpdateStepPatchDelivered
 	inplaceUpdateStepSucceeded
 )
 
-// 前置检查不产生写入，Upgrade 可在 PreUpgrade 之前复用；不能用旧轮次未完成拒绝新目标。
+// The pre-check produces no write and Upgrade may reuse it before PreUpgrade;
+// an unfinished previous round must not reject a new target.
 func validateInplaceUpdate(pod *corev1.Pod, box *agentsv1alpha1.Sandbox) (*inplaceupdate.InPlaceUpdateState, error) {
 	if pod.Labels[agentsv1alpha1.PodLabelTemplateHash] == "" {
 		return nil, newInplaceError(inplaceClassUntrackedPod, "pod has no template-hash label and does not support in-place update")
@@ -136,7 +144,8 @@ func validateInplaceUpdate(pod *corev1.Pod, box *agentsv1alpha1.Sandbox) (*inpla
 	return state, nil
 }
 
-// 配置生效与最终 Ready 分开判断，等待诊断由 adapter 根据 Pod 状态生成。
+// Configuration taking effect and final Ready are judged separately; the wait
+// diagnostics are produced by the adapter based on Pod status.
 func handleInPlaceUpdateCommon(ctx context.Context, control *inplaceupdate.InPlaceUpdateControl,
 	pod *corev1.Pod, box *agentsv1alpha1.Sandbox, targetRevision string,
 ) (inplaceUpdateStepResult, error) {
@@ -152,7 +161,8 @@ func handleInPlaceUpdateCommon(ctx context.Context, control *inplaceupdate.InPla
 		return observeInplaceUpdate(ctx, pod, state)
 	}
 
-	// 新目标直接下发；底层负责延续未落实的资源跟踪并重建镜像目标记录。
+	// Deliver the new target directly; the lower layer continues any pending
+	// resource tracking and rebuilds the image target record.
 	if _, err := deliverInplacePatch(ctx, control, pod, box, targetRevision); err != nil {
 		return inplaceUpdateStepPatchDelivered, wrapInplaceError(inplaceClassUpdateFailed, "cannot deliver in-place update", err)
 	}

@@ -122,16 +122,20 @@ func (c *Cache) NewSandboxWaitReadyTask(ctx context.Context, sbx *agentsv1alpha1
 		}
 		inplaceCond := utils.GetSandboxCondition(&s.Status, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
 		if inplaceCond != nil && s.Spec.UpgradePolicy == nil {
-			// 旧轮次的 Condition 不能证明当前目标可交付，也不能终止当前等待。
+			// A Condition from a previous round cannot prove the current target is
+			// deliverable, nor can it end the current wait.
 			if inplaceCond.ObservedGeneration != s.Generation {
 				return false, nil
 			}
 			if inplaceCond.Status == metav1.ConditionFalse && inplaceCond.Reason == agentsv1alpha1.SandboxInplaceUpdateReasonFailed {
 				return false, fmt.Errorf("sandbox in-place update failed: %s", inplaceCond.Message)
 			}
-			// 集群不支持 resize 是终态，控制器不会再重试，继续等待只会超时。
-			// 沙箱本身仍可服务，所以放行给下面的运行状态检查；目标规格未生效
-			// 由 InplaceUpdate=False/UnsupportedResize 和 Warning 事件告知调用方。
+			// A cluster that does not support resize is a terminal state: the
+			// controller will not retry, so continuing to wait only times out.
+			// The sandbox itself is still serviceable, so fall through to the
+			// running-state check below; the target spec not taking effect is
+			// reported to the caller via InplaceUpdate=False/UnsupportedResize and
+			// a Warning event.
 			if inplaceCond.Reason != agentsv1alpha1.SandboxInplaceUpdateReasonUnsupportedResize &&
 				(inplaceCond.Status != metav1.ConditionTrue || inplaceCond.Reason != agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded) {
 				return false, nil

@@ -59,7 +59,8 @@ type UpgradeControl struct {
 	initializer       SandboxInitializer
 	syncStatusFromPod func(pod *corev1.Pod, newStatus *agentsv1alpha1.SandboxStatus, syncReadyCondition bool)
 	resumeFunc        ResumeFunc
-	// 原地更新结果通过 Upgrading 汇报；Ready 按阶段和真实 Pod 状态映射，不写 InplaceUpdate。
+	// The in-place update result is reported through Upgrading; Ready is mapped
+	// by step and real Pod status, without writing InplaceUpdate.
 	inplaceUpdateControl *inplaceupdate.InPlaceUpdateControl
 }
 
@@ -117,8 +118,9 @@ func RequiresPodReplacementUpgrade(box *agentsv1alpha1.Sandbox) bool {
 // sandbox through the Upgrading phase and its lifecycle state machine
 // (PreUpgrade → Checkpointing → UpgradePod → PostUpgrade).
 //
-// 所有显式升级策略（包括 InplaceUpdate）都进入 Upgrading 并执行生命周期。
-// Ready 独立反映 Pod 健康与当前步骤；无升级策略的 Claim 更新仍留在 Running。
+// All explicit upgrade policies (including InplaceUpdate) enter Upgrading and
+// run the lifecycle. Ready independently reflects Pod health and the current
+// step; a Claim update with no upgrade policy stays in Running.
 func RequiresUpgradeSandbox(box *agentsv1alpha1.Sandbox) bool {
 	if box.Spec.UpgradePolicy == nil {
 		return false
@@ -145,10 +147,11 @@ func RequiresInplaceUpgrade(box *agentsv1alpha1.Sandbox) bool {
 //
 //	Resuming → ResumeSucceed → PreUpgrade → Checkpointing → UpgradePod → PostUpgrade → Succeeded
 //
-// 失败的 hook 步骤不终止本轮：修正 spec.lifecycle 后的下一次 reconcile 重新执行，直到
-// progress.Deadline 到期才停止执行新副作用。Checkpointing 和 UpgradePod 失败后不重放，
-// 因为它们的输入变更要么改变 revision 并由 calculateStatus 复位，要么需要新 SUO。
-// 新 SUO 重置生命周期；同轮已成功的 hook 不重复执行，结果未知的 hook 不自动重放。
+// A failed hook step does not terminate this round: the next reconcile after
+// spec.lifecycle is corrected re-runs that hook. Checkpointing and UpgradePod
+// are not replayed after a failure, because their input changes either change
+// the revision and are reset by calculateStatus, or require a new SUO. A new
+// SUO resets the lifecycle.
 func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureFuncArgs) (retErr error) {
 	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
 	isCheckpointRestore := box.Spec.UpgradePolicy != nil &&
@@ -223,7 +226,8 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 		klog.InfoS("Waiting for template patch after resume", "sandbox", klog.KObj(box))
 		return nil
 	case agentsv1alpha1.SandboxUpgradingReasonPreUpgrade, agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed:
-		// 在前置 hook 产生副作用前完成能静态确定的原地更新校验。
+		// Complete the statically determinable in-place update validation before
+		// the pre-upgrade hook produces side effects.
 		if RequiresInplaceUpgrade(box) && pod != nil {
 			if _, err := validateInplaceUpdate(pod, box); err != nil {
 				r.failUpgrade(args, upgradeCond, agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed, err.Error())
@@ -449,7 +453,8 @@ func (r *UpgradeControl) executeUpgradePodStep(ctx context.Context, args EnsureF
 			}
 			return nil, false, err
 		}
-		// 配置生效才进入 PostUpgrade；正常等待中的 Ready 跟随 Pod。
+		// Only enter PostUpgrade once the configuration takes effect; during a
+		// normal wait, Ready follows the Pod.
 		setUpdateReady(newStatus, podIsReady(args.Pod), agentsv1alpha1.SandboxReadyReasonUpgrading, inplaceWaitMessage(args.Pod))
 		if step != inplaceUpdateStepSucceeded {
 			upgradeCond.Message = utils.TruncateConditionMessage(inplaceWaitMessage(args.Pod))
@@ -465,7 +470,9 @@ func (r *UpgradeControl) executeUpgradePodStep(ctx context.Context, args EnsureF
 
 	done, err := r.performRecreateUpgrade(ctx, args)
 	if err != nil || !done {
-		// 旧 Pod 已删除或替换尚未完成时，不能延续删除前观察到的 Ready=True。
+		// When the old Pod is already deleted or the replacement is not yet
+		// complete, the Ready=True observed before deletion must not be carried
+		// over.
 		msg := inplaceWaitMessage(args.Pod)
 		if err != nil {
 			msg = err.Error()
@@ -490,12 +497,14 @@ func (r *UpgradeControl) executeUpgradePodStep(ctx context.Context, args EnsureF
 	return &freshPod, true, nil
 }
 
-// performInplaceUpgrade 仅返回共享引擎的阶段和错误，Condition 由外层 adapter 映射。
-// 新 SUO 可以修正未完成的镜像目标，不以旧轮次失败或 Pod 未 Ready 阻挡下发。
+// performInplaceUpgrade only returns the shared engine's step and error; the
+// Condition is mapped by the outer adapter. A new SUO can correct an unfinished
+// image target and is not blocked by a previous round's failure or a not-Ready Pod.
 func (r *UpgradeControl) performInplaceUpgrade(ctx context.Context, args EnsureFuncArgs) (inplaceUpdateStepResult, error) {
 	pod, box := args.Pod, args.Box
 	if pod == nil {
-		// 保留暂停恢复或 Pod 丢失时的创建能力；现存 Pod 绝不因镜像失败被删除。
+		// Preserve the ability to create on pause-resume or when the Pod is lost;
+		// an existing Pod is never deleted due to an image failure.
 		_, err := r.performRecreateUpgrade(ctx, args)
 		return inplaceUpdateStepPatchDelivered, err
 	}
@@ -571,14 +580,16 @@ func (r *UpgradeControl) performRecreateUpgrade(ctx context.Context, args Ensure
 		return false, nil
 	}
 
-	// 等待容器启动后初始化并执行 PostUpgrade，最终 Ready 留给生命周期收尾判断。
+	// Initialize and run PostUpgrade after the containers start; the final Ready
+	// is left to the lifecycle finalization to judge.
 	cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
 	if !podContainersRunning(pod) {
 		klog.InfoS("Waiting for new pod to be ready", "sandbox", klog.KObj(box))
 		for _, cStatus := range pod.Status.ContainerStatuses {
 			if cStatus.State.Waiting != nil {
 				reason := cStatus.State.Waiting.Reason
-				// 创建、拉取退避与重启都属于正常启动过程，只有镜像名非法才立即判失败。
+				// Creation, pull backoff and restart are all part of normal startup;
+				// only an invalid image name fails immediately.
 				if reason != "InvalidImageName" && reason != "ErrImageNeverPull" {
 					continue
 				}
@@ -610,7 +621,8 @@ func (r *UpgradeControl) performRecreateUpgrade(ctx context.Context, args Ensure
 	return true, nil
 }
 
-// 容器运行仅代表执行通道可能可用，不代替 Pod Ready。
+// Containers running only means the execution channel may be available; it is
+// not a substitute for Pod Ready.
 func podContainersRunning(pod *corev1.Pod) bool {
 	if pod == nil || !pod.DeletionTimestamp.IsZero() || len(pod.Spec.Containers) == 0 {
 		return false

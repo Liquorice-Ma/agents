@@ -107,9 +107,10 @@ func applyResizeSubresourcePatch(ctx context.Context, c client.Client, obj clien
 			}
 		}
 	}
-	// 真实 controller-runtime 在子资源 patch 后会把服务端返回（含新的
-	// resourceVersion）刷新回传入对象；这里同样写回 obj，保证调用方后续
-	// 带乐观锁的 metadata patch 能读到最新版本。
+	// Real controller-runtime refreshes the passed-in object with the server
+	// response (including the new resourceVersion) after a subresource patch;
+	// write back to obj here too, so a later optimistic-lock metadata patch by
+	// the caller can read the latest version.
 	if err := c.Update(ctx, existing); err != nil {
 		return err
 	}
@@ -663,7 +664,8 @@ func TestInPlaceUpdateControl_Update_ResizeNotSupported(t *testing.T) {
 		},
 		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch,
 			opts ...client.PatchOption) error {
-			// 意图 patch 可以成功；按 spec 字段识别资源写入，不依赖是否携带 metadata。
+			// The intent patch may succeed; the resource write is identified by spec
+			// fields and does not depend on whether metadata is carried.
 			data, err := patch.Data(obj)
 			if err != nil {
 				return err
@@ -750,7 +752,8 @@ func TestInPlaceUpdateControl_Update_ResizeSubresourceServerError(t *testing.T) 
 	if err == nil {
 		t.Fatalf("expected non-nil error from failing resize subresource")
 	}
-	// resize 失败时仍返回未完成，但此前持久化的资源意图必须保留。
+	// A failed resize still returns incomplete, but the resource intent
+	// persisted earlier must be preserved.
 	if progressed {
 		t.Fatalf("expected progressed=false when resize fails before patch")
 	}
@@ -956,7 +959,7 @@ func TestInPlaceUpdateControl_Update_ResizeConflictRetryNoLongerNeeded(t *testin
 	require.True(t, state.UpdateResources)
 	completed, err := IsInplaceUpdateCompleted(t.Context(), updated, state)
 	require.NoError(t, err)
-	require.False(t, completed, "spec 已下发，status 尚未确认资源生效")
+	require.False(t, completed, "spec delivered, status has not yet confirmed the resource took effect")
 	updated.Status.ContainerStatuses = []corev1.ContainerStatus{{
 		Name: "c", Resources: updated.Spec.Containers[0].Resources.DeepCopy(),
 	}}
@@ -2317,7 +2320,8 @@ func TestIsInplaceUpdateCompletedWithResourceConditions(t *testing.T) {
 		t.Fatalf("unexpected terminal error: %v", terminalErr)
 	}
 
-	// 仅 kubelet 已观察到当前 generation 的 Infeasible 才终止本轮。
+	// Only terminate this round when kubelet has observed Infeasible for the
+	// current generation.
 	pod.Generation = 2
 	pod.Status.Resize = ""
 	pod.Status.Conditions = []corev1.PodCondition{
@@ -2338,7 +2342,7 @@ func TestIsInplaceUpdateCompletedWithResourceConditions(t *testing.T) {
 		t.Fatalf("expected error containing 'infeasible', got: %v", terminalErr)
 	}
 
-	// Deferred 保留等待，不提前终止。
+	// Deferred keeps waiting and does not terminate early.
 	pod.Status.Resize = ""
 	pod.Status.Conditions = []corev1.PodCondition{
 		{
@@ -3457,7 +3461,8 @@ func TestInPlaceUpdateControl_Update_ResizeBeforePatch(t *testing.T) {
 		},
 	}
 
-	// 记录意图持久化、resize、镜像与 metadata 收尾的顺序。
+	// Record the order of intent persistence, resize, image, and metadata
+	// finalization.
 	var callOrder []string
 	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
 	wrapped := interceptor.NewClient(base, interceptor.Funcs{

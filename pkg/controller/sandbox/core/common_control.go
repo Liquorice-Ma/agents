@@ -184,8 +184,10 @@ func (r *commonControl) EnsureSandboxUpdated(ctx context.Context, args EnsureFun
 	// because it runs through the Upgrading phase instead.
 	if !RequiresUpgradeSandbox(box) {
 		_, err := r.handleInplaceUpdateSandbox(ctx, args)
-		// done 同时包含成功与终止失败，不能据此覆盖 adapter 设置的 Ready。
-		// args.Pod 可能是 patch 前对象，此处只同步状态信息，Pod watch 会触发后续观察。
+		// done covers both success and terminal failure, so it must not be used to
+		// override the Ready set by the adapter.
+		// args.Pod may be the pre-patch object; only sync status info here, and the
+		// Pod watch will trigger later observations.
 		r.syncStatusFromPod(pod, newStatus, false)
 		return err
 	}
@@ -421,15 +423,17 @@ func (h *CommonInPlaceUpdateHandler) GetRecorder() record.EventRecorder {
 	return h.recorder
 }
 
-// Claim adapter 保留阶段事实并负责最终 Ready。done=true 也可能表示终止失败。
-// Pod 写入和最终状态写入仍通过 write-tracking client 记录 tracing。
+// The Claim adapter keeps the step facts and owns the final Ready. done=true
+// may also indicate a terminal failure. Pod writes and the final status write
+// still record tracing through the write-tracking client.
 func handleClaimInplaceUpdate(ctx context.Context, handler InPlaceUpdateHandler, pod *corev1.Pod,
 	box *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus,
 ) (done bool, err error) {
 	previous := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
 	if previous != nil && isTerminalInplaceUpdateReason(previous.Reason) &&
 		previous.ObservedGeneration == box.Generation && box.Status.UpdateRevision == newStatus.UpdateRevision {
-		// 保留终态但继续反映健康变化；只有可重新确认的无副作用前置拒绝允许 Ready=True。
+		// Keep the terminal state but keep reflecting health changes; only a
+		// re-confirmable, side-effect-free pre-check rejection allows Ready=True.
 		_, validationErr := validateInplaceUpdate(pod, box)
 		ready := validationErr != nil && classifyInplaceError(validationErr) != inplaceClassStateCorrupted && podIsReady(pod)
 		setUpdateReady(newStatus, ready, agentsv1alpha1.SandboxReadyReasonInplaceUpdating, previous.Message)
@@ -442,13 +446,15 @@ func handleClaimInplaceUpdate(ctx context.Context, handler InPlaceUpdateHandler,
 	status := metav1.ConditionFalse
 	if stepErr != nil {
 		msg = utils.TruncateConditionMessage(stepErr.Error())
-		// 前置拒绝不推断健康；执行失败和损坏状态均关闭 Ready 门禁。
+		// A pre-check rejection does not infer health; execution failures and
+		// corrupted states both close the Ready gate.
 		if result == inplaceUpdateStepPatchDelivered || classifyInplaceError(stepErr) == inplaceClassStateCorrupted || !isTerminalInplaceError(stepErr) {
 			ready = false
 		}
 		if isTerminalInplaceError(stepErr) {
 			reason = agentsv1alpha1.SandboxInplaceUpdateReasonFailed
-			// resize 不被支持是独立终态，映射到 UnsupportedResize 便于上层区分处置。
+			// An unsupported resize is a distinct terminal state, mapped to
+			// UnsupportedResize so upper layers can distinguish the handling.
 			if isUnsupportedResizeError(stepErr) {
 				reason = agentsv1alpha1.SandboxInplaceUpdateReasonUnsupportedResize
 			}
@@ -466,8 +472,10 @@ func handleClaimInplaceUpdate(ctx context.Context, handler InPlaceUpdateHandler,
 	} else if result == inplaceUpdateStepSucceeded {
 		msg = "configuration applied; waiting for Pod Ready: " + msg
 	}
-	// 内存缩容会被 resize 路径的宽松比较静默跳过，镜像升级照常进行；这里对首次
-	// 观测到该 generation 的推进补一个建议事件，提醒用户目标内存并未真正下调。
+	// A memory downscale is silently skipped by the resize path's lenient
+	// comparison while the image upgrade proceeds as usual; emit an advisory
+	// event on the first observed progress for this generation to remind the
+	// user that the target memory was not actually reduced.
 	if stepErr == nil && (result == inplaceUpdateStepPatchDelivered || result == inplaceUpdateStepSucceeded) &&
 		(previous == nil || previous.ObservedGeneration != box.Generation) {
 		if downscaleErr := inplaceupdate.CheckMemoryDownscale(box, pod); downscaleErr != nil {
@@ -476,8 +484,9 @@ func handleClaimInplaceUpdate(ctx context.Context, handler InPlaceUpdateHandler,
 			}
 		}
 	}
-	// SetSandboxCondition 更新已有 Condition 时不会刷新 ObservedGeneration，
-	// 这里直接同步指针，确保跨轮 Claim 消费方和事件去重按当前 generation 判断。
+	// SetSandboxCondition does not refresh ObservedGeneration when it updates an
+	// existing Condition, so sync the pointer directly here to ensure cross-round
+	// Claim consumers and event dedup judge by the current generation.
 	if previous != nil {
 		previous.ObservedGeneration = box.Generation
 	}
@@ -521,8 +530,9 @@ func inplaceWaitMessage(pod *corev1.Pod) string {
 	return "waiting for target configuration and Pod readiness"
 }
 
-// isTerminalInplaceUpdateReason 判断 InplaceUpdate Condition 的原因是否代表
-// 不应被重新评估或覆盖的终态失败。
+// isTerminalInplaceUpdateReason reports whether the InplaceUpdate Condition
+// reason represents a terminal failure that should not be re-evaluated or
+// overwritten.
 func isTerminalInplaceUpdateReason(reason string) bool {
 	return reason == agentsv1alpha1.SandboxInplaceUpdateReasonFailed ||
 		reason == agentsv1alpha1.SandboxInplaceUpdateReasonUnsupportedResize

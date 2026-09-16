@@ -54,7 +54,8 @@ func (e *ResizeNotSupportedError) Unwrap() error {
 	return e.Err
 }
 
-// ImagePullFailedError 表示明确无效或禁止拉取的目标镜像；退避和临时拉取失败继续等待。
+// ImagePullFailedError indicates the target image is definitively invalid or forbidden to pull;
+// backoff and transient pull failures should keep waiting instead.
 type ImagePullFailedError struct {
 	ContainerName string
 	Reason        string
@@ -69,7 +70,8 @@ func (e *ImagePullFailedError) Error() string {
 	return msg
 }
 
-// ResizeInfeasibleError 保留资源无法落实的结构化事实，便于调用方分类而不解析 Message。
+// ResizeInfeasibleError preserves the structured fact that resources cannot be realized,
+// so callers can classify it without parsing Message.
 type ResizeInfeasibleError struct{ Message string }
 
 func (e *ResizeInfeasibleError) Error() string { return e.Message }
@@ -103,7 +105,8 @@ type InPlaceUpdateState struct {
 // to determine whether the InPlaceUpdate is completed.
 type InPlaceUpdateContainerStatus struct {
 	ImageID string `json:"imageID,omitempty"`
-	// 新记录直接跟踪目标引用，支持回到同一 ImageID；旧记录仍兼容基线判断。
+	// New records track the target reference directly so a rollback to the same ImageID is
+	// supported; old records remain compatible with the baseline comparison.
 	TargetImage string `json:"targetImage,omitempty"`
 }
 
@@ -127,7 +130,8 @@ type InPlaceUpdateOptions struct {
 	Pod      *corev1.Pod
 	// for future extensions of pod update behavior
 	ExtensionAnnotations map[string]string
-	// ResourceUpdateRequired 表示仍需观察资源落实，不等于本次必须再次写入资源。
+	// ResourceUpdateRequired means resource realization still needs to be observed; it does not
+	// mean this call must write resources again.
 	ResourceUpdateRequired bool
 }
 
@@ -173,7 +177,8 @@ func DefaultGeneratePatchBodyFunc(opts InPlaceUpdateOptions) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("cannot generate patch from invalid in-place state: %w", err)
 	}
-	// 延续之前尚未完成的跟踪，metadata 收尾不能抹掉 resize 或镜像的生效门槛。
+	// Carry over the previously unfinished tracking; finalizing metadata must not erase the
+	// realization gate for resize or image.
 	if previous != nil {
 		state.UpdateResources = state.UpdateResources || previous.UpdateResources
 		for name, status := range previous.LastContainerStatuses {
@@ -309,11 +314,12 @@ func DefaultBuildResizeContainers(opts InPlaceUpdateOptions) []corev1.Container 
 	return resizeContainers
 }
 
-// 资源写入只携带目标资源，不携带 Container 中其他必填字段。
+// Resource writes carry only the target resources, not the other required fields of Container.
 func resourceContainersPatch(resizeContainers []corev1.Container) []map[string]any {
 	containers := make([]map[string]any, 0, len(resizeContainers))
 	for _, c := range resizeContainers {
-		// 只编码资源字段，避免 Container 的必填 image 字段意外出现在 resize 请求中。
+		// Encode only the resource fields, to avoid the required image field of Container leaking
+		// into the resize request.
 		containers = append(containers, map[string]any{"name": c.Name, "resources": c.Resources})
 	}
 	return containers
@@ -336,7 +342,8 @@ func CheckResizeQoSChange(box *agentsv1alpha1.Sandbox, pod *corev1.Pod) (orig, u
 	changes := buildContainerResourcesMap(DefaultBuildResizeContainers(InPlaceUpdateOptions{Box: box, Pod: pod}))
 	for i := range afterPod.Spec.Containers {
 		if change, ok := changes[afterPod.Spec.Containers[i].Name]; ok {
-			// 与资源 patch 的合并语义一致，保留 LimitRange 等注入的未声明资源。
+			// Match the merge semantics of the resource patch, preserving undeclared resources
+			// injected by LimitRange and the like.
 			resources := &afterPod.Spec.Containers[i].Resources
 			if resources.Requests == nil {
 				resources.Requests = corev1.ResourceList{}
@@ -491,9 +498,12 @@ func (c *InPlaceUpdateControl) Update(ctx context.Context, opts InPlaceUpdateOpt
 	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
 
 	current := pod.DeepCopy()
-	// 先记录资源更新意图，再 resize，最后写镜像与目标 hash。三次写入不构成事务。
-	// 必须 resize 优先：hash 注解是升级完成的权威信号，若先 patch、resize 再失败，
-	// hash 已显示"已升级"而资源仍是旧值，会陷入难以检测和恢复的不一致状态。
+	// First record the resource update intent, then resize, and finally write the image and
+	// target hash. These three writes do not form a transaction.
+	// Resize must go first: the hash annotation is the authoritative signal of a completed
+	// upgrade, so if we patched first and resize then failed, the hash would already show
+	// "upgraded" while resources stayed at the old values, leaving an inconsistency that is hard
+	// to detect and recover from.
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
@@ -509,7 +519,8 @@ func (c *InPlaceUpdateControl) Update(ctx context.Context, opts InPlaceUpdateOpt
 	})
 	resourceUpdateRequired := opts.ResourceUpdateRequired || len(resizeContainers) > 0 || (state != nil && state.UpdateResources)
 	if len(resizeContainers) > 0 {
-		// 意图必须先落盘，否则 resize 成功、后续 patch 失败后将丢失资源跟踪。
+		// The intent must be persisted first; otherwise, if resize succeeds and a later patch fails,
+		// the resource tracking would be lost.
 		if state == nil {
 			state = &InPlaceUpdateState{Revision: current.Labels[agentsv1alpha1.PodLabelTemplateHash], UpdateTimestamp: metav1.Now()}
 		}
@@ -608,7 +619,8 @@ func (c *InPlaceUpdateControl) patchPodResources(ctx context.Context, logger klo
 			logger.Error(err, "direct resource patch conflicted")
 			return err
 		}
-		// 网络、限流和未知结果不能伪装成集群不支持 resize。
+		// Network, throttling, and unknown outcomes must not masquerade as the cluster not
+		// supporting resize.
 		if apierrors.IsInvalid(err) || apierrors.IsMethodNotSupported(err) {
 			return &ResizeNotSupportedError{Err: err}
 		}
@@ -618,14 +630,17 @@ func (c *InPlaceUpdateControl) patchPodResources(ctx context.Context, logger klo
 	return nil
 }
 
-// 每笔资源写入绑定观察到的版本，避免旧请求覆盖新的资源目标。
+// Each resource write binds the observed version, to avoid a stale request overwriting a newer
+// resource target.
 func resourcePatchWithVersion(pod *corev1.Pod, containers []corev1.Container) string {
 	return fmt.Sprintf(`{"metadata":{"resourceVersion":%q},"spec":%s}`, pod.ResourceVersion,
 		utils.DumpJson(map[string]any{"containers": resourceContainersPatch(containers)}))
 }
 
-// IsInplaceUpdateCompleted 只判断配置是否实际生效；Ready 与等待预算由调用方负责。
-// nil state 表示没有更新记录；状态解析错误必须由调用方显式处理。
+// IsInplaceUpdateCompleted only judges whether the configuration actually took effect; Ready and
+// the wait budget are the caller's responsibility.
+// A nil state means there is no update record; state parsing errors must be handled explicitly by
+// the caller.
 func IsInplaceUpdateCompleted(ctx context.Context, pod *corev1.Pod, state *InPlaceUpdateState) (bool, error) {
 	logger := logf.FromContext(ctx).WithValues("pod", klog.KObj(pod))
 
@@ -653,8 +668,10 @@ func IsInplaceUpdateCompleted(ctx context.Context, pod *corev1.Pod, state *InPla
 	return true, nil
 }
 
-// 新记录以正在运行的目标镜像为完成依据，回退到原镜像不再要求 ImageID 改变。
-// 未携带 TargetImage 的历史记录保留旧基线判断，防止滚动升级期间误报完成。
+// New records use the running target image as the completion criterion; a rollback to the
+// original image no longer requires the ImageID to change.
+// Historical records without TargetImage keep the old baseline comparison, to avoid a false
+// completion during a rolling upgrade.
 func isPodImageUpdateCompleted(pod *corev1.Pod, state *InPlaceUpdateState) bool {
 	statuses := make(map[string]corev1.ContainerStatus, len(pod.Status.ContainerStatuses))
 	for _, status := range pod.Status.ContainerStatuses {
@@ -688,7 +705,8 @@ func sameImageReference(a, b string) bool {
 	return err == nil && reference.TagNameOnly(first).String() == reference.TagNameOnly(second).String()
 }
 
-// 只检查本轮跟踪容器的确定性错误；ErrImagePull/ImagePullBackOff 留给调用方预算。
+// Only check deterministic errors for the containers tracked in this round; ErrImagePull/
+// ImagePullBackOff are left to the caller's budget.
 func checkPodImagePullFailed(pod *corev1.Pod, state *InPlaceUpdateState) error {
 	for i := range pod.Status.ContainerStatuses {
 		cs := &pod.Status.ContainerStatuses[i]
@@ -696,7 +714,8 @@ func checkPodImagePullFailed(pod *corev1.Pod, state *InPlaceUpdateState) error {
 		if !tracked {
 			continue
 		}
-		// 新目标下发后，旧镜像的失败状态可能尚未刷新，不能据此结束新轮次。
+		// After a new target is dispatched, the old image's failure state may not have refreshed
+		// yet, so it must not end the new round.
 		if target.TargetImage != "" && !sameImageReference(cs.Image, target.TargetImage) {
 			continue
 		}
@@ -730,7 +749,8 @@ func isPodResourceResizeCompleted(pod *corev1.Pod) bool {
 		if !ok || status.Resources == nil {
 			return false
 		}
-		// 下调也必须等待实际资源收敛，旧的较大配额不代表新目标已生效。
+		// A downsize must also wait for the actual resources to converge; the old larger quota does
+		// not mean the new target has taken effect.
 		if !ResourcesExactlyEqual(c.Resources, *status.Resources) {
 			return false
 		}
@@ -738,13 +758,15 @@ func isPodResourceResizeCompleted(pod *corev1.Pod) bool {
 	return true
 }
 
-// 明确 Infeasible/Error 才失败；Deferred 继续等待资源释放，兼容旧集群 Resize 字段。
+// Only an explicit Infeasible/Error fails; Deferred keeps waiting for resources to be released,
+// while remaining compatible with the Resize field of older clusters.
 func checkPodResizeInfeasible(pod *corev1.Pod) error {
 	for _, cond := range pod.Status.Conditions {
 		if cond.Status != corev1.ConditionTrue {
 			continue
 		}
-		// kubelet 尚未观察到新目标时，旧 Infeasible/Error 不能终止修正后的轮次。
+		// When the kubelet has not yet observed the new target, a stale Infeasible/Error must not
+		// terminate the corrected round.
 		if pod.Generation <= 0 || cond.ObservedGeneration < pod.Generation {
 			continue
 		}
@@ -759,7 +781,9 @@ func checkPodResizeInfeasible(pod *corev1.Pod) error {
 			}
 		}
 	}
-	// 旧集群若不提供观察版本，无法可靠归属失败，保守等待调用方预算而不误杀新目标。
+	// If an old cluster does not provide the observed version, failures cannot be reliably
+	// attributed, so wait conservatively for the caller's budget rather than killing the new target
+	// by mistake.
 	if pod.Generation > 0 && pod.Status.ObservedGeneration >= pod.Generation && pod.Status.Resize == corev1.PodResizeStatusInfeasible {
 		return &ResizeInfeasibleError{Message: "pod resize is infeasible (status.resize)"}
 	}
