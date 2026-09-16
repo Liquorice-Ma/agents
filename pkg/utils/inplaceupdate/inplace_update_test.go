@@ -2320,15 +2320,12 @@ func TestIsInplaceUpdateCompletedWithResourceConditions(t *testing.T) {
 		t.Fatalf("unexpected terminal error: %v", terminalErr)
 	}
 
-	// Only terminate this round when kubelet has observed Infeasible for the
-	// current generation.
-	pod.Generation = 2
+	// An Infeasible resize terminates this round.
 	pod.Status.Resize = ""
 	pod.Status.Conditions = []corev1.PodCondition{
 		{
 			Type: corev1.PodResizePending, Status: corev1.ConditionTrue,
 			Reason: corev1.PodReasonInfeasible, Message: "insufficient cpu",
-			ObservedGeneration: 2,
 		},
 	}
 	completed, terminalErr = IsInplaceUpdateCompleted(context.Background(), pod, state)
@@ -2393,34 +2390,15 @@ func Test_checkPodResizeInfeasible(t *testing.T) {
 			},
 		},
 		{
-			name: "old infeasible condition does not terminate corrected target",
-			pod: &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{Generation: 3},
-				Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{
-					Type: corev1.PodResizePending, Status: corev1.ConditionTrue,
-					Reason: corev1.PodReasonInfeasible, ObservedGeneration: 2,
-				}}},
-			},
-		},
-		{
-			name: "missing observed generation keeps waiting",
-			pod: &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{Generation: 3},
-				Status:     corev1.PodStatus{Resize: corev1.PodResizeStatusInfeasible},
-			},
-		},
-		{
 			name: "PodResizePending with Infeasible reason",
 			pod: &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{Generation: 2},
 				Status: corev1.PodStatus{
 					Conditions: []corev1.PodCondition{
 						{
-							Type:               corev1.PodResizePending,
-							Status:             corev1.ConditionTrue,
-							Reason:             corev1.PodReasonInfeasible,
-							Message:            "insufficient cpu",
-							ObservedGeneration: 2,
+							Type:    corev1.PodResizePending,
+							Status:  corev1.ConditionTrue,
+							Reason:  corev1.PodReasonInfeasible,
+							Message: "insufficient cpu",
 						},
 					},
 				},
@@ -2431,15 +2409,13 @@ func Test_checkPodResizeInfeasible(t *testing.T) {
 		{
 			name: "PodResizeInProgress with Error reason",
 			pod: &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{Generation: 2},
 				Status: corev1.PodStatus{
 					Conditions: []corev1.PodCondition{
 						{
-							Type:               corev1.PodResizeInProgress,
-							Status:             corev1.ConditionTrue,
-							Reason:             corev1.PodReasonError,
-							Message:            "cgroup apply failed",
-							ObservedGeneration: 2,
+							Type:    corev1.PodResizeInProgress,
+							Status:  corev1.ConditionTrue,
+							Reason:  corev1.PodReasonError,
+							Message: "cgroup apply failed",
 						},
 					},
 				},
@@ -2450,10 +2426,8 @@ func Test_checkPodResizeInfeasible(t *testing.T) {
 		{
 			name: "deprecated Resize field is Infeasible",
 			pod: &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{Generation: 2},
 				Status: corev1.PodStatus{
-					ObservedGeneration: 2,
-					Resize:             corev1.PodResizeStatusInfeasible,
+					Resize: corev1.PodResizeStatusInfeasible,
 				},
 			},
 			wantErr:   true,

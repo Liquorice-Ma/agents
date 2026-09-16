@@ -765,11 +765,6 @@ func checkPodResizeInfeasible(pod *corev1.Pod) error {
 		if cond.Status != corev1.ConditionTrue {
 			continue
 		}
-		// When the kubelet has not yet observed the new target, a stale Infeasible/Error must not
-		// terminate the corrected round.
-		if pod.Generation <= 0 || cond.ObservedGeneration < pod.Generation {
-			continue
-		}
 		switch cond.Type {
 		case corev1.PodResizePending:
 			if cond.Reason == corev1.PodReasonInfeasible {
@@ -781,10 +776,9 @@ func checkPodResizeInfeasible(pod *corev1.Pod) error {
 			}
 		}
 	}
-	// If an old cluster does not provide the observed version, failures cannot be reliably
-	// attributed, so wait conservatively for the caller's budget rather than killing the new target
-	// by mistake.
-	if pod.Generation > 0 && pod.Status.ObservedGeneration >= pod.Generation && pod.Status.Resize == corev1.PodResizeStatusInfeasible {
+	// Fallback compatibility check for older clusters (K8s 1.27-1.32) that still rely on the
+	// deprecated pod.Status.Resize field.
+	if pod.Status.Resize == corev1.PodResizeStatusInfeasible {
 		return &ResizeInfeasibleError{Message: "pod resize is infeasible (status.resize)"}
 	}
 	return nil
