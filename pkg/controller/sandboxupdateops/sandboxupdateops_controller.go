@@ -480,8 +480,7 @@ func (r *Reconciler) classifySandbox(ctx context.Context, sbx *agentsv1alpha1.Sa
 	// before it reached ResumeSucceed, so the template patch was never
 	// applied. Treat it as resume-succeeded so Reconcile applies the
 	// pending template patch.
-	if cond == nil && sbx.Status.Phase == agentsv1alpha1.SandboxRunning &&
-		ops.Spec.UpdateStrategy.Type != agentsv1alpha1.SandboxUpdateOpsStrategyInplaceUpdate {
+	if cond == nil && sbx.Status.Phase == agentsv1alpha1.SandboxRunning {
 		return sandboxResumeSucceed
 	}
 

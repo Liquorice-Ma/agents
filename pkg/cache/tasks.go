@@ -121,25 +121,8 @@ func (c *Cache) NewSandboxWaitReadyTask(ctx context.Context, sbx *agentsv1alpha1
 			return false, fmt.Errorf("sandbox startup failed (reason=%s): %s", readyCond.Reason, readyCond.Message)
 		}
 		inplaceCond := utils.GetSandboxCondition(&s.Status, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
-		if inplaceCond != nil && s.Spec.UpgradePolicy == nil {
-			// A Condition from a previous round cannot prove the current target is
-			// deliverable, nor can it end the current wait.
-			if inplaceCond.ObservedGeneration != s.Generation {
-				return false, nil
-			}
-			if inplaceCond.Status == metav1.ConditionFalse && inplaceCond.Reason == agentsv1alpha1.SandboxInplaceUpdateReasonFailed {
-				return false, fmt.Errorf("sandbox in-place update failed: %s", inplaceCond.Message)
-			}
-			// A cluster that does not support resize is a terminal state: the
-			// controller will not retry, so continuing to wait only times out.
-			// The sandbox itself is still serviceable, so fall through to the
-			// running-state check below; the target spec not taking effect is
-			// reported to the caller via InplaceUpdate=False/UnsupportedResize and
-			// a Warning event.
-			if inplaceCond.Reason != agentsv1alpha1.SandboxInplaceUpdateReasonUnsupportedResize &&
-				(inplaceCond.Status != metav1.ConditionTrue || inplaceCond.Reason != agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded) {
-				return false, nil
-			}
+		if inplaceCond != nil && inplaceCond.Reason == agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating {
+			return false, nil
 		}
 		state, _ := utils.GetSandboxState(s)
 		return state == agentsv1alpha1.SandboxStateRunning && s.Status.PodInfo.PodIP != "", nil

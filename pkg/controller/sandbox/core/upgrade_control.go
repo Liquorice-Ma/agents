@@ -59,8 +59,7 @@ type UpgradeControl struct {
 	initializer       SandboxInitializer
 	syncStatusFromPod func(pod *corev1.Pod, newStatus *agentsv1alpha1.SandboxStatus, syncReadyCondition bool)
 	resumeFunc        ResumeFunc
-	// The in-place update result is reported through Upgrading; Ready is mapped
-	// by step and real Pod status, without writing InplaceUpdate.
+	// 原地策略仅报告 Upgrading；Ready 沿用共享生命周期规则，不写 Claim 的 InplaceUpdate。
 	inplaceUpdateControl *inplaceupdate.InPlaceUpdateControl
 }
 
@@ -118,9 +117,8 @@ func RequiresPodReplacementUpgrade(box *agentsv1alpha1.Sandbox) bool {
 // sandbox through the Upgrading phase and its lifecycle state machine
 // (PreUpgrade → Checkpointing → UpgradePod → PostUpgrade).
 //
-// All explicit upgrade policies (including InplaceUpdate) enter Upgrading and
-// run the lifecycle. Ready independently reflects Pod health and the current
-// step; a Claim update with no upgrade policy stays in Running.
+// 所有显式升级策略（包括 InplaceUpdate）进入共享升级生命周期。
+// 无升级策略的 Claim 更新仍留在 Running。
 func RequiresUpgradeSandbox(box *agentsv1alpha1.Sandbox) bool {
 	if box.Spec.UpgradePolicy == nil {
 		return false
@@ -147,23 +145,23 @@ func RequiresInplaceUpgrade(box *agentsv1alpha1.Sandbox) bool {
 //
 //	Resuming → ResumeSucceed → PreUpgrade → Checkpointing → UpgradePod → PostUpgrade → Succeeded
 //
-// A failed hook step does not terminate this round: the next reconcile after
-// spec.lifecycle is corrected re-runs that hook. Checkpointing and UpgradePod
-// are not replayed after a failure, because their input changes either change
-// the revision and are reset by calculateStatus, or require a new SUO. A new
-// SUO resets the lifecycle.
+// Each reconcile cycle processes exactly one state and returns nil so the
+// controller can persist the updated condition before re-entering the next
+// state. Failed states (PreUpgradeFailed, CheckpointFailed, UpgradePodFailed,
+// PostUpgradeFailed) are retried on subsequent reconciles.
 func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureFuncArgs) (retErr error) {
 	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
 	isCheckpointRestore := box.Spec.UpgradePolicy != nil &&
 		box.Spec.UpgradePolicy.Type == agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore
 
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if pod != nil {
-		r.syncStatusFromPod(pod, newStatus, false)
-	}
-	setUpdateReady(newStatus, podIsReady(pod), agentsv1alpha1.SandboxReadyReasonUpgrading, "sandbox is upgrading")
+	// Set Ready=False during upgrade
+	utils.SetSandboxCondition(newStatus, metav1.Condition{
+		Type:               string(agentsv1alpha1.SandboxConditionReady),
+		Status:             metav1.ConditionFalse,
+		Reason:             agentsv1alpha1.SandboxReadyReasonUpgrading,
+		Message:            "sandbox is upgrading",
+		LastTransitionTime: metav1.Now(),
+	})
 	upgradeCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
 	// First entry — if the sandbox was paused, start with Resuming to ensure it is
 	// woken up before proceeding with the upgrade lifecycle. Otherwise start at
@@ -226,18 +224,6 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 		klog.InfoS("Waiting for template patch after resume", "sandbox", klog.KObj(box))
 		return nil
 	case agentsv1alpha1.SandboxUpgradingReasonPreUpgrade, agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed:
-		// Complete the statically determinable in-place update validation before
-		// the pre-upgrade hook produces side effects.
-		if RequiresInplaceUpgrade(box) && pod != nil {
-			if _, err := validateInplaceUpdate(pod, box); err != nil {
-				r.failUpgrade(args, upgradeCond, agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed, err.Error())
-				if classifyInplaceError(err) == inplaceClassQoSRejected && podIsReady(pod) {
-					newStatus.Phase = agentsv1alpha1.SandboxRunning
-					setUpdateReady(newStatus, true, "", "")
-				}
-				return nil
-			}
-		}
 		// Execute preUpgrade if configured
 		if hasUpgradeAction(box, true) {
 			var action *agentsv1alpha1.UpgradeAction
@@ -247,7 +233,11 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 			result := r.executeUpgradeAction(ctx, pod, box, action)
 			klog.InfoS("preUpgrade result", "sandbox", klog.KObj(box), "succeeded", result.Succeeded, "message", result.Message)
 			if !result.Succeeded {
-				r.failUpgrade(args, upgradeCond, agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed, result.Message)
+				// Record preUpgrade action failed
+				upgradeCond.Message = result.Message
+				upgradeCond.Reason = agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed
+				utils.SetSandboxCondition(newStatus, *upgradeCond)
+				r.recordUpgradeEvent(box, corev1.EventTypeWarning, EventUpgradePreUpgradeFailed, "PreUpgrade failed: %s", result.Message)
 				return nil
 			}
 		}
@@ -309,15 +299,13 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 			result := r.executeUpgradeAction(ctx, pod, boxForHook, action)
 			klog.InfoS("postUpgrade result", "sandbox", klog.KObj(box), "succeeded", result.Succeeded, "message", result.Message)
 			if !result.Succeeded {
-				r.failUpgrade(args, upgradeCond, agentsv1alpha1.SandboxUpgradingReasonPostUpgradeFailed, result.Message)
+				// Record postUpgrade action failed
+				upgradeCond.Message = result.Message
+				upgradeCond.Reason = agentsv1alpha1.SandboxUpgradingReasonPostUpgradeFailed
+				utils.SetSandboxCondition(newStatus, *upgradeCond)
+				r.recordUpgradeEvent(box, corev1.EventTypeWarning, EventUpgradePostUpgradeFailed, "PostUpgrade failed: %s", result.Message)
 				return nil
 			}
-		}
-		if !podIsReady(pod) {
-			upgradeCond.Message = utils.TruncateConditionMessage("PostUpgrade completed; waiting for Pod Ready: " + inplaceWaitMessage(pod))
-			utils.SetSandboxCondition(newStatus, *upgradeCond)
-			setUpdateReady(newStatus, false, agentsv1alpha1.SandboxReadyReasonUpgrading, upgradeCond.Message)
-			return nil
 		}
 
 		// For CheckpointRestore, clean up checkpoint CRs after the entire upgrade succeeds.
@@ -352,7 +340,6 @@ func (r *UpgradeControl) failUpgrade(args EnsureFuncArgs, cond *metav1.Condition
 	cond.Status, cond.Reason, cond.Message = metav1.ConditionFalse, reason, utils.TruncateConditionMessage(msg)
 	cond.ObservedGeneration = args.Box.Generation
 	utils.SetSandboxCondition(args.NewStatus, *cond)
-	setUpdateReady(args.NewStatus, false, agentsv1alpha1.SandboxReadyReasonUpgrading, cond.Message)
 	if report {
 		r.recordUpgradeEvent(args.Box, corev1.EventTypeWarning, reason, "%s", cond.Message)
 	}
@@ -446,43 +433,37 @@ func (r *UpgradeControl) executeUpgradePodStep(ctx context.Context, args EnsureF
 		if err != nil {
 			upgradeCond.Message = utils.TruncateConditionMessage(err.Error())
 			utils.SetSandboxCondition(newStatus, *upgradeCond)
-			setUpdateReady(newStatus, false, agentsv1alpha1.SandboxReadyReasonUpgrading, upgradeCond.Message)
 			if isTerminalInplaceError(err) {
 				r.failUpgrade(args, upgradeCond, agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed, err.Error())
 				return nil, false, nil
 			}
 			return nil, false, err
 		}
-		// Only enter PostUpgrade once the configuration takes effect; during a
-		// normal wait, Ready follows the Pod.
-		setUpdateReady(newStatus, podIsReady(args.Pod), agentsv1alpha1.SandboxReadyReasonUpgrading, inplaceWaitMessage(args.Pod))
-		if step != inplaceUpdateStepSucceeded {
+		// 原地策略在自己的 UpgradePod 步骤内等待配置生效和 Pod Ready，保留共享 hook 顺序。
+		if step != inplaceUpdateStepSucceeded || !podIsReady(args.Pod) {
 			upgradeCond.Message = utils.TruncateConditionMessage(inplaceWaitMessage(args.Pod))
 			utils.SetSandboxCondition(newStatus, *upgradeCond)
 			return nil, false, nil
 		}
+		r.syncStatusFromPod(args.Pod, newStatus, false)
+		// 暂停恢复会留下待初始化状态；正常原地更新不重复初始化已有运行时。
+		if cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.RuntimeInitialized)); cond != nil && cond.Status != metav1.ConditionTrue {
+			if err := r.initializer.Initialize(ctx, box, newStatus); err != nil {
+				return nil, false, err
+			}
+		}
 		klog.InfoS("In-place UpgradePod step completed, transitioning to PostUpgrade", "sandbox", klog.KObj(box))
 		r.recordUpgradeEvent(box, corev1.EventTypeNormal, EventUpgradePodInplaceUpdate, "Pod updated in place successfully, proceeding to PostUpgrade")
-		// The pod was patched rather than replaced, so the pod reference stays valid
-		// and no re-fetch or re-initialization is required.
 		return args.Pod, true, nil
 	}
 
 	done, err := r.performRecreateUpgrade(ctx, args)
-	if err != nil || !done {
-		// When the old Pod is already deleted or the replacement is not yet
-		// complete, the Ready=True observed before deletion must not be carried
-		// over.
-		msg := inplaceWaitMessage(args.Pod)
-		if err != nil {
-			msg = err.Error()
-		}
-		setUpdateReady(newStatus, false, agentsv1alpha1.SandboxReadyReasonUpgrading, msg)
-		if err != nil && isTerminalInplaceError(err) {
-			r.failUpgrade(args, upgradeCond, agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed, msg)
-			return nil, false, nil
-		}
+	if err != nil {
+		klog.ErrorS(err, "UpgradePod step failed", "sandbox", klog.KObj(box))
 		return nil, false, err
+	} else if !done {
+		klog.InfoS("UpgradePod step in progress", "sandbox", klog.KObj(box))
+		return nil, false, nil
 	}
 
 	klog.InfoS("UpgradePod step completed, transitioning to PostUpgrade", "sandbox", klog.KObj(box))
@@ -506,12 +487,20 @@ func (r *UpgradeControl) performInplaceUpgrade(ctx context.Context, args EnsureF
 		// Preserve the ability to create on pause-resume or when the Pod is lost;
 		// an existing Pod is never deleted due to an image failure.
 		_, err := r.performRecreateUpgrade(ctx, args)
+		if err == nil {
+			// 补建的 Pod 尚未初始化，不能沿用丢失 Pod 的初始化成功状态。
+			utils.SetSandboxCondition(args.NewStatus, metav1.Condition{
+				Type: string(agentsv1alpha1.RuntimeInitialized), Status: metav1.ConditionFalse,
+				Reason:  agentsv1alpha1.SandboxConditionRuntimeInitReasonPending,
+				Message: "Waiting for pod ready before initialization", LastTransitionTime: metav1.Now(),
+			})
+		}
 		return inplaceUpdateStepPatchDelivered, err
 	}
 	if r.inplaceUpdateControl == nil {
 		return inplaceUpdateStepInProgress, fmt.Errorf("in-place upgrade is not configured for sandbox %s/%s", box.Namespace, box.Name)
 	}
-	return handleInPlaceUpdateCommon(ctx, r.inplaceUpdateControl, pod, box, args.NewStatus.UpdateRevision)
+	return handleInPlaceUpdateCommon(ctx, r.inplaceUpdateControl, pod, box, args.NewStatus.UpdateRevision, inplaceupdate.TargetConvergenceMode)
 }
 
 // performRecreateUpgrade handles the Recreate upgrade step (delete old pod + create new pod).
@@ -580,32 +569,37 @@ func (r *UpgradeControl) performRecreateUpgrade(ctx context.Context, args Ensure
 		return false, nil
 	}
 
-	// Initialize and run PostUpgrade after the containers start; the final Ready
-	// is left to the lifecycle finalization to judge.
+	// Step 3: Wait for new Pod to be running and ready
+	pCond := utils.GetPodCondition(&pod.Status, corev1.PodReady)
 	cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
-	if !podContainersRunning(pod) {
+	if pCond == nil || pCond.Status != corev1.ConditionTrue {
 		klog.InfoS("Waiting for new pod to be ready", "sandbox", klog.KObj(box))
 		for _, cStatus := range pod.Status.ContainerStatuses {
 			if cStatus.State.Waiting != nil {
 				reason := cStatus.State.Waiting.Reason
-				// Creation, pull backoff and restart are all part of normal startup;
-				// only an invalid image name fails immediately.
-				if reason != "InvalidImageName" && reason != "ErrImageNeverPull" {
+				// PodInitializing and ContainerCreating are normal transient states during startup, skip them
+				if reason == WaitingReasonPodInitializing || reason == WaitingReasonContainerCreating {
 					continue
 				}
 				// Other waiting reasons indicate container startup failure
 				klog.InfoS("container waiting with abnormal reason", "sandbox", klog.KObj(box),
 					"container", cStatus.Name, "reason", reason, "message", cStatus.State.Waiting.Message)
-				r.failUpgrade(args, cond, agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed,
-					fmt.Sprintf("container %s: %s - %s", cStatus.Name, reason, cStatus.State.Waiting.Message))
-				return false, nil
+				cond.Reason = agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed
+				cond.Message = fmt.Sprintf("container %s: %s - %s", cStatus.Name, reason, cStatus.State.Waiting.Message)
+				utils.SetSandboxCondition(newStatus, *cond)
+				r.recordUpgradeEvent(box, corev1.EventTypeWarning, EventUpgradePodFailed,
+					"Container %s waiting: %s - %s", cStatus.Name, reason, cStatus.State.Waiting.Message)
 			} else if cStatus.State.Terminated != nil {
 				klog.InfoS("container terminated unexpectedly", "sandbox", klog.KObj(box),
 					"container", cStatus.Name, "reason", cStatus.State.Terminated.Reason,
 					"exitCode", cStatus.State.Terminated.ExitCode, "message", cStatus.State.Terminated.Message)
-				cond.Message = utils.TruncateConditionMessage(fmt.Sprintf("container %s: terminated with exit code %d - %s",
-					cStatus.Name, cStatus.State.Terminated.ExitCode, cStatus.State.Terminated.Reason))
+				cond.Reason = agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed
+				cond.Message = fmt.Sprintf("container %s: terminated with exit code %d - %s",
+					cStatus.Name, cStatus.State.Terminated.ExitCode, cStatus.State.Terminated.Reason)
 				utils.SetSandboxCondition(newStatus, *cond)
+				r.recordUpgradeEvent(box, corev1.EventTypeWarning, EventUpgradePodFailed,
+					"Container %s terminated with exit code %d - %s",
+					cStatus.Name, cStatus.State.Terminated.ExitCode, cStatus.State.Terminated.Reason)
 			}
 		}
 		return false, nil
@@ -619,24 +613,6 @@ func (r *UpgradeControl) performRecreateUpgrade(ctx context.Context, args Ensure
 	}
 
 	return true, nil
-}
-
-// Containers running only means the execution channel may be available; it is
-// not a substitute for Pod Ready.
-func podContainersRunning(pod *corev1.Pod) bool {
-	if pod == nil || !pod.DeletionTimestamp.IsZero() || len(pod.Spec.Containers) == 0 {
-		return false
-	}
-	statuses := make(map[string]corev1.ContainerStatus, len(pod.Status.ContainerStatuses))
-	for _, status := range pod.Status.ContainerStatuses {
-		statuses[status.Name] = status
-	}
-	for _, container := range pod.Spec.Containers {
-		if statuses[container.Name].State.Running == nil {
-			return false
-		}
-	}
-	return true
 }
 
 // upgradeActionResult represents the result of executing an upgrade hook.

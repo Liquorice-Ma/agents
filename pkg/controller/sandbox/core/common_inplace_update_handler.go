@@ -88,8 +88,7 @@ func classifyInplaceError(err error) inplaceErrorClass {
 	return inplaceClassUpdateFailed
 }
 
-// Callers share the error-handling rules; an unknown write result is retried
-// and observed first, without pretending to be a terminal failure.
+// SUO 原地 adapter 使用此分类；Claim 和重建保留各自原有的错误处理。
 func isTerminalInplaceError(err error) bool {
 	if classifyInplaceError(err) != inplaceClassUpdateFailed {
 		return true
@@ -101,14 +100,6 @@ func isTerminalInplaceError(err error) bool {
 		errors.As(err, &imageErr) || apierrors.IsForbidden(err) ||
 		apierrors.IsUnauthorized(err) || apierrors.IsInvalid(err) ||
 		apierrors.IsBadRequest(err) || apierrors.IsMethodNotSupported(err)
-}
-
-// isUnsupportedResizeError reports whether a terminal error is an unsupported
-// resize, used to map a generic Failed to the finer-grained UnsupportedResize
-// terminal reason.
-func isUnsupportedResizeError(err error) bool {
-	var resizeErr *inplaceupdate.ResizeNotSupportedError
-	return errors.As(err, &resizeErr)
 }
 
 // The step is still valid when error is non-nil; Succeeded only means the
@@ -124,8 +115,8 @@ const (
 	inplaceUpdateStepSucceeded
 )
 
-// The pre-check produces no write and Upgrade may reuse it before PreUpgrade;
-// an unfinished previous round must not reject a new target.
+// SUO 在 UpgradePod 的实际写入前校验；不改变共享 PreUpgrade 的执行时机。
+// 未完成的上一轮更新不阻止修正目标。
 func validateInplaceUpdate(pod *corev1.Pod, box *agentsv1alpha1.Sandbox) (*inplaceupdate.InPlaceUpdateState, error) {
 	if pod.Labels[agentsv1alpha1.PodLabelTemplateHash] == "" {
 		return nil, newInplaceError(inplaceClassUntrackedPod, "pod has no template-hash label and does not support in-place update")
@@ -134,11 +125,24 @@ func validateInplaceUpdate(pod *corev1.Pod, box *agentsv1alpha1.Sandbox) (*inpla
 	if recorded := box.Annotations[agentsv1alpha1.SandboxHashImmutablePart]; recorded != "" && recorded != immutable {
 		return nil, newInplaceError(inplaceClassUnsupportedChange, "in-place update only supports changing container images, resources and template metadata")
 	}
+	// init container 不由原地执行器写入；仅比较模板声明的镜像和资源，忽略注入的容器。
+	for _, desired := range box.Spec.Template.Spec.InitContainers {
+		found := false
+		for _, actual := range pod.Spec.InitContainers {
+			if actual.Name == desired.Name {
+				found = actual.Image == desired.Image && inplaceupdate.ResourcesExactlyEqual(desired.Resources, actual.Resources)
+				break
+			}
+		}
+		if !found {
+			return nil, newInplaceError(inplaceClassUnsupportedChange, "InplaceUpdate does not support init container changes")
+		}
+	}
 	state, err := inplaceupdate.GetPodInPlaceUpdateState(pod)
 	if err != nil {
 		return nil, wrapInplaceError(inplaceClassStateCorrupted, "cannot determine in-place update progress", err)
 	}
-	if orig, target, changed := inplaceupdate.CheckResizeQoSChange(box, pod); changed {
+	if orig, target, changed := inplaceupdate.TargetConvergenceMode.CheckResizeQoSChange(box, pod); changed {
 		return nil, newInplaceError(inplaceClassQoSRejected, fmt.Sprintf("resource resize would change QoS class from %s to %s, resize rejected", orig, target))
 	}
 	return state, nil
@@ -147,8 +151,25 @@ func validateInplaceUpdate(pod *corev1.Pod, box *agentsv1alpha1.Sandbox) (*inpla
 // Configuration taking effect and final Ready are judged separately; the wait
 // diagnostics are produced by the adapter based on Pod status.
 func handleInPlaceUpdateCommon(ctx context.Context, control *inplaceupdate.InPlaceUpdateControl,
-	pod *corev1.Pod, box *agentsv1alpha1.Sandbox, targetRevision string,
+	pod *corev1.Pod, box *agentsv1alpha1.Sandbox, targetRevision string, mode inplaceupdate.UpdateMode,
 ) (inplaceUpdateStepResult, error) {
+	// 兼容路径的校验及报告顺序由 Claim adapter 保留；这里仅观察已有更新或执行写入。
+	if mode != inplaceupdate.TargetConvergenceMode {
+		if pod.Labels[agentsv1alpha1.PodLabelTemplateHash] == targetRevision {
+			completed, err := inplaceupdate.IsInplaceUpdateCompleted(ctx, pod)
+			return inplaceCompletionStep(completed), err
+		}
+		state, err := inplaceupdate.GetPodInPlaceUpdateState(pod)
+		if err != nil {
+			return inplaceUpdateStepInProgress, err
+		}
+		if state != nil {
+			completed, err := mode.IsInplaceUpdateCompleted(ctx, pod, state)
+			return inplaceCompletionStep(completed), err
+		}
+		changed, err := deliverInplacePatch(ctx, control, pod, box, targetRevision, mode)
+		return inplaceCompletionStep(!changed && err == nil), err
+	}
 	if err := ctx.Err(); err != nil {
 		return inplaceUpdateStepInProgress, wrapInplaceError(inplaceClassUpdateFailed, "update cancelled", err)
 	}
@@ -156,14 +177,14 @@ func handleInPlaceUpdateCommon(ctx context.Context, control *inplaceupdate.InPla
 	if err != nil {
 		return inplaceUpdateStepInProgress, err
 	}
-	metadataOnly := isMetadataOnlyChange(pod, box)
+	metadataOnly := isMetadataOnlyChangeWithMode(pod, box, inplaceupdate.TargetConvergenceMode)
 	if pod.Labels[agentsv1alpha1.PodLabelTemplateHash] == targetRevision && metadataOnly {
 		return observeInplaceUpdate(ctx, pod, state)
 	}
 
 	// Deliver the new target directly; the lower layer continues any pending
 	// resource tracking and rebuilds the image target record.
-	if _, err := deliverInplacePatch(ctx, control, pod, box, targetRevision); err != nil {
+	if _, err := deliverInplacePatch(ctx, control, pod, box, targetRevision, inplaceupdate.TargetConvergenceMode); err != nil {
 		return inplaceUpdateStepPatchDelivered, wrapInplaceError(inplaceClassUpdateFailed, "cannot deliver in-place update", err)
 	}
 	if metadataOnly {
@@ -172,15 +193,19 @@ func handleInPlaceUpdateCommon(ctx context.Context, control *inplaceupdate.InPla
 	return inplaceUpdateStepPatchDelivered, nil
 }
 
+func inplaceCompletionStep(completed bool) inplaceUpdateStepResult {
+	if completed {
+		return inplaceUpdateStepSucceeded
+	}
+	return inplaceUpdateStepPatchDelivered
+}
+
 func observeInplaceUpdate(ctx context.Context, pod *corev1.Pod, state *inplaceupdate.InPlaceUpdateState) (inplaceUpdateStepResult, error) {
-	completed, err := inplaceupdate.IsInplaceUpdateCompleted(ctx, pod, state)
+	completed, err := inplaceupdate.TargetConvergenceMode.IsInplaceUpdateCompleted(ctx, pod, state)
 	if err != nil {
 		return inplaceUpdateStepPatchDelivered, wrapInplaceError(inplaceClassUpdateFailed, "in-place pod update failed", err)
 	}
-	if completed {
-		return inplaceUpdateStepSucceeded, nil
-	}
-	return inplaceUpdateStepPatchDelivered, nil
+	return inplaceCompletionStep(completed), nil
 }
 
 // describeInplaceWaitReason reports, from pod status facts only, why an
@@ -212,8 +237,10 @@ func deliverInplacePatch(
 	pod *corev1.Pod,
 	box *agentsv1alpha1.Sandbox,
 	targetRevision string,
+	mode inplaceupdate.UpdateMode,
 ) (bool, error) {
 	opts := inplaceupdate.InPlaceUpdateOptions{
+		Mode:     mode,
 		Pod:      pod,
 		Box:      box,
 		Revision: targetRevision,
@@ -228,15 +255,12 @@ func deliverInplacePatch(
 // the sandbox template is metadata (labels/annotations), with no image or
 // resource changes. When this is the case, the controller can directly patch
 // the pod metadata without going through the full in-place update flow.
-//
-// Resource comparison is exact for every resource declared in the sandbox
-// template: the pod must have the same value for each. Extra resources
-// injected into the pod (e.g., by LimitRanger or other admission webhooks) are
-// ignored so that metadata-only changes are not mistakenly treated as
-// in-place updates. Using exact comparison (not >=) ensures that lowering a
-// resource in the template is detected as a real change requiring an in-place
-// resize, not a no-op metadata patch that would bypass the QoS guard.
 func isMetadataOnlyChange(pod *corev1.Pod, box *agentsv1alpha1.Sandbox) bool {
+	return isMetadataOnlyChangeWithMode(pod, box, inplaceupdate.CompatibilityMode)
+}
+
+// 默认资源比较保留至少满足目标的合同；SUO 显式要求声明的资源键精确一致。
+func isMetadataOnlyChangeWithMode(pod *corev1.Pod, box *agentsv1alpha1.Sandbox, mode inplaceupdate.UpdateMode) bool {
 	if box.Spec.Template == nil {
 		return false
 	}
@@ -254,7 +278,11 @@ func isMetadataOnlyChange(pod *corev1.Pod, box *agentsv1alpha1.Sandbox) bool {
 		if origin.Image != container.Image {
 			return false
 		}
-		if !inplaceupdate.ResourcesExactlyEqual(origin.Resources, container.Resources) {
+		resourcesSatisfied := inplaceupdate.IsResourceSatisfied(origin.Resources, container.Resources)
+		if mode == inplaceupdate.TargetConvergenceMode {
+			resourcesSatisfied = inplaceupdate.ResourcesExactlyEqual(origin.Resources, container.Resources)
+		}
+		if !resourcesSatisfied {
 			return false
 		}
 	}

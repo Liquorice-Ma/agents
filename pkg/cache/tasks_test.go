@@ -212,9 +212,7 @@ func TestNewSandboxWaitReadyTask_UnsupportedResize_ReturnsReadyWhenSandboxUsable
 					Status:  metav1.ConditionFalse,
 					Reason:  agentsv1alpha1.SandboxInplaceUpdateReasonUnsupportedResize,
 					Message: "in-place pod resize not supported",
-					// The controller always stamps the current generation when it
-					// writes the InplaceUpdate Condition, so the fixture must stamp it
-					// too; otherwise the stale-round guard rejects it first.
+					// Condition 代际不参与领取门控；仍检查 Sandbox status 的代际。
 					ObservedGeneration: 1,
 				},
 			},
@@ -233,22 +231,24 @@ func TestNewSandboxWaitReadyTask_InplaceGeneration(t *testing.T) {
 		conditionStatus metav1.ConditionStatus
 		reason          string
 		upgrade         bool
+		staleStatus     bool
 		wantError       string
 	}{
-		{name: "current failed despite healthy pod", generation: 2, conditionStatus: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed, wantError: "in-place update failed: QoS rejected"},
-		{name: "previous failed waits for current observation", generation: 1, conditionStatus: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed, wantError: "object is not satisfied"},
-		{name: "previous success is not deliverable", generation: 1, conditionStatus: metav1.ConditionTrue, reason: agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded, wantError: "object is not satisfied"},
+		{name: "current failed with healthy pod is usable", generation: 2, conditionStatus: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed},
+		{name: "previous failed with healthy pod is usable", generation: 1, conditionStatus: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed},
+		{name: "previous success is deliverable", generation: 1, conditionStatus: metav1.ConditionTrue, reason: agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded},
 		{name: "current update still waiting", generation: 2, conditionStatus: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating, wantError: "object is not satisfied"},
 		{name: "current success is deliverable", generation: 2, conditionStatus: metav1.ConditionTrue, reason: agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded},
 		// An unsupported resize is a terminal state, the sandbox is still
 		// serviceable, and the caller must not be left hanging until timeout.
 		{name: "current unsupported resize is usable", generation: 2, conditionStatus: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxInplaceUpdateReasonUnsupportedResize},
-		{name: "previous unsupported resize waits for current observation", generation: 1, conditionStatus: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxInplaceUpdateReasonUnsupportedResize, wantError: "object is not satisfied"},
+		{name: "previous unsupported resize is usable", generation: 1, conditionStatus: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxInplaceUpdateReasonUnsupportedResize},
+		{name: "unobserved sandbox still waits", generation: 2, conditionStatus: metav1.ConditionTrue, reason: agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded, staleStatus: true, wantError: "object is not satisfied"},
+		{name: "upgrade does not bypass inplace updating", generation: 1, conditionStatus: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating, upgrade: true, wantError: "object is not satisfied"},
 		{name: "explicit upgrade ignores old claim failure", generation: 1, conditionStatus: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed, upgrade: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			// A healthy old Pod does not mean the current Claim target has been
-			// updated successfully.
+			// 领取保留 master 的可用性合同，不强制原地更新 Succeeded。
 			sbx := &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "claim-generation", Generation: 2},
 				Status: agentsv1alpha1.SandboxStatus{
@@ -259,6 +259,9 @@ func TestNewSandboxWaitReadyTask_InplaceGeneration(t *testing.T) {
 						{Type: string(agentsv1alpha1.SandboxConditionInplaceUpdate), Status: tt.conditionStatus, Reason: tt.reason, Message: "QoS rejected", ObservedGeneration: tt.generation},
 					},
 				},
+			}
+			if tt.staleStatus {
+				sbx.Status.ObservedGeneration--
 			}
 			if tt.upgrade {
 				sbx.Spec.UpgradePolicy = &agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyInplaceUpdate}

@@ -24,6 +24,7 @@ import (
 	"reflect"
 
 	v1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -161,15 +162,19 @@ func validateInplaceUpdateFeasible(sbx *agentsv1alpha1.Sandbox, ops *agentsv1alp
 	if sbx.Spec.Template == nil || len(ops.Spec.Patch.Raw) == 0 {
 		return ""
 	}
+	merged, err := mergeTemplateWithPatch(sbx, ops)
+	if err != nil {
+		return err.Error()
+	}
+	// SUO 执行器只更新普通容器；不改变公共 hash 与 Claim 的兼容合同。
+	if !apiequality.Semantic.DeepEqual(sbx.Spec.Template.Spec.InitContainers, merged.Spec.InitContainers) {
+		return "InplaceUpdate does not support init container changes"
+	}
 	// No hash annotation means the sandbox controller has not recorded a baseline
 	// yet; skip the check, consistent with the controller's own short-circuit.
 	annotationHash := sbx.Annotations[agentsv1alpha1.SandboxHashImmutablePart]
 	if annotationHash == "" {
 		return ""
-	}
-	merged, err := mergeTemplateWithPatch(sbx, ops)
-	if err != nil {
-		return err.Error()
 	}
 	mergedBox := sbx.DeepCopy()
 	mergedBox.Spec.Template = merged
