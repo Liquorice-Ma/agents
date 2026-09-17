@@ -1416,10 +1416,9 @@ func TestExecuteUpgradePodStep_Branches(t *testing.T) {
 	}
 }
 
-// After a new operation is accepted, even if the old image is still backing
-// off, the correct image can be delivered via inplace. When rolling back to the
-// original image, the ImageID is allowed to stay unchanged, but the target
-// container must be observed running and the final Ready awaited.
+// 新操作可以在旧镜像拉取失败时下发回滚目标，并保留原 Pod。
+// 共享引擎仍使用 CompatibilityMode：ImageID 不变时继续等待；
+// ImageID 变化后还需等待 Pod Ready，不能套用目标模式的同 ImageID 完成规则。
 func TestInplaceUpgradeRollbackWhileStuck(t *testing.T) {
 	box := newUpgradeTestSandbox(nil, &agentsv1alpha1.SandboxUpgradePolicy{
 		Type: agentsv1alpha1.SandboxUpgradePolicyInplaceUpdate,
@@ -1476,7 +1475,10 @@ func TestInplaceUpgradeRollbackWhileStuck(t *testing.T) {
 	state, err := inplaceupdate.GetPodInPlaceUpdateState(&patched)
 	require.NoError(t, err)
 	require.NotNil(t, state)
-	require.Equal(t, "test:v1", state.LastContainerStatuses["sandbox"].TargetImage)
+	require.Equal(t, "old-revision", state.Revision)
+	require.True(t, state.UpdateImages)
+	require.Equal(t, "img-old", state.LastContainerStatuses["sandbox"].ImageID)
+	require.Empty(t, state.LastContainerStatuses["sandbox"].TargetImage, "兼容模式只记录 ImageID 基线")
 	// Delivery does not mean it took effect; the real backoff reason is still
 	// written into Message.
 	c := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
@@ -1485,20 +1487,48 @@ func TestInplaceUpgradeRollbackWhileStuck(t *testing.T) {
 		assert.Contains(t, c.Message, "ImagePullBackOff", "the wait reason must be surfaced on the Upgrading condition")
 	}
 
-	// After the same ImageID reruns the target image, the configuration step is
-	// complete but it still waits for Pod Ready.
-	patched.Status.ContainerStatuses[0].Image = "test:v1"
-	patched.Status.ContainerStatuses[0].State = corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
-	args := EnsureFuncArgs{Pod: &patched, Box: box, NewStatus: newStatus}
-	require.NoError(t, ctrl.EnsureSandboxUpgraded(t.Context(), args))
-	c = utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
-	require.Equal(t, agentsv1alpha1.SandboxUpgradingReasonUpgradePod, c.Reason)
-	require.Equal(t, metav1.ConditionFalse, c.Status)
-	patched.Status.Conditions[0].Status = corev1.ConditionTrue
-	require.NoError(t, ctrl.EnsureSandboxUpgraded(t.Context(), args))
-	require.Equal(t, agentsv1alpha1.SandboxRunning, newStatus.Phase)
-	require.Equal(t, agentsv1alpha1.SandboxUpgradingReasonSucceeded,
-		utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading)).Reason)
+	// 分别验证镜像完成观察与 Ready 门槛；每个场景使用独立的 Pod 和 Sandbox 状态。
+	for _, tt := range []struct {
+		name          string
+		imageID       string
+		podReady      bool
+		wantSucceeded bool
+	}{
+		{name: "same image ID and not ready waits", imageID: "img-old"},
+		{name: "same image ID and ready still waits", imageID: "img-old", podReady: true},
+		{name: "changed image ID but not ready waits", imageID: "img-new"},
+		{name: "changed image ID and ready succeeds", imageID: "img-new", podReady: true, wantSucceeded: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			observedPod := patched.DeepCopy()
+			observedPod.Status.ContainerStatuses[0].Image = "test:v1"
+			observedPod.Status.ContainerStatuses[0].ImageID = tt.imageID
+			observedPod.Status.ContainerStatuses[0].State = corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
+			observedPod.Status.ContainerStatuses[0].Ready = tt.podReady
+			observedPod.Status.Conditions[0].Status = corev1.ConditionFalse
+			if tt.podReady {
+				observedPod.Status.Conditions[0].Status = corev1.ConditionTrue
+			}
+			status := newStatus.DeepCopy()
+			require.NoError(t, ctrl.EnsureSandboxUpgraded(t.Context(), EnsureFuncArgs{Pod: observedPod, Box: box, NewStatus: status}))
+			upgradeCond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionUpgrading))
+			readyCond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionReady))
+			require.NotNil(t, upgradeCond)
+			require.NotNil(t, readyCond)
+			require.Nil(t, utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionInplaceUpdate)))
+			if tt.wantSucceeded {
+				require.Equal(t, agentsv1alpha1.SandboxRunning, status.Phase)
+				require.Equal(t, agentsv1alpha1.SandboxUpgradingReasonSucceeded, upgradeCond.Reason)
+				require.Equal(t, metav1.ConditionTrue, upgradeCond.Status)
+				require.Equal(t, metav1.ConditionTrue, readyCond.Status)
+			} else {
+				require.Equal(t, agentsv1alpha1.SandboxUpgrading, status.Phase)
+				require.Equal(t, agentsv1alpha1.SandboxUpgradingReasonUpgradePod, upgradeCond.Reason)
+				require.Equal(t, metav1.ConditionFalse, upgradeCond.Status)
+				require.Equal(t, metav1.ConditionFalse, readyCond.Status)
+			}
+		})
+	}
 }
 
 // TestInplaceUpgradePatchTransientError verifies that a transient patch
