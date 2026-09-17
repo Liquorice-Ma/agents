@@ -41,6 +41,30 @@ see-also:
 - 镜像记录新增 `targetImage`，以实际运行目标确认生效，允许回到原 ImageID；历史记录仍使用原基线判断。
 - Claim 等待端仅在 `InplaceUpdate=False/InplaceUpdating` 时等待。QoS 或 immutable-hash 拒绝等未写入镜像或资源的终态 `Failed`，若 Sandbox 保持 `Running` 且旧 Pod 健康，则沿用既有行为并允许交付；显式 Upgrade 不继承旧 Claim Condition。
 
+#### 待解决：部分写入重试误入 metadata 快速路径（2026-09-17）
+
+状态：用户确认暂缓修复，保留现有快速路径；具体方案尚未确定，本次仅记录问题，不调整引擎、底层更新模式或追踪协议。上文“部分写入后仍须观察资源实际生效”是目标约束，不能据此认为当前路径已经实现或验证该保证。
+
+触发过程：
+
+1. 首次更新的 resize 成功，Pod.spec 中的资源已变为目标值，但容器实际资源尚未生效。
+2. 随后的 metadata/hash Patch 失败，例如返回 Conflict；本次调用报告 `inplaceUpdateStepPatchDelivered` 和错误。
+3. 重试读取到已更新的 Pod.spec，目标 hash 尚未补齐；`isMetadataOnlyChange` 仅比较 spec 与模板，将本次补写识别为 metadata-only。
+4. metadata Patch 成功后，引擎直接返回 `inplaceUpdateStepSucceeded`，没有等待实际资源生效。若采用“引擎 Succeeded 且 Pod Ready 即最终成功”的 Claim adapter，此时旧 Pod 仍 Ready 就会提前写出 `Ready=True`、`InplaceUpdate=True/Succeeded`。
+
+根因与修复边界：
+
+- spec 已匹配目标不等于运行状态已生效；旧镜像或资源更新仍未完成时叠加 metadata 变更，也有相同的快速路径风险。
+- 单独移除快速成功返回、改为下一轮观察，不一定解决全部问题：若部分写入后的追踪记录缺失，或旧记录没有覆盖本次资源更新，完成检查仍可能漏掉待观察资源。因此不能把这一调整单独视为完整修复。
+- 后续方案需要区分真正的纯 metadata 更新与未完成更新的收尾，并保证跨重试观察当前目标；目前未选择具体实现，不直接切换整个 UpdateMode，以免同时改变资源降配等兼容语义。
+- 此问题独立于 `handleInPlaceUpdateCommon` 的 `newStatus` 参数移除及历史终态短路清理，后两项的变更不代表本问题已经关闭。
+
+后续验收场景（暂未实施）：
+
+- resize 成功、metadata 失败后重试成功，但实际资源仍旧、Pod Ready：不得提前报告更新成功，继续观察配置生效。
+- 上一轮镜像或资源尚未生效时仅修改 metadata：不得因 spec 匹配而跳过已有更新的完成检查。
+- 没有待完成更新的纯 metadata 变更可正常完成；资源或镜像实际生效后，Claim 仍须结合 Pod Ready 判定最终成功。
+
 ### 新 SUO 与有限生命周期
 
 - 补救沿用删除旧 SUO、提交正确 images 的新 SUO。新 UID 开始完整生命周期，不继承旧 hook；用户仍可选择 InplaceUpdate 或 Recreate。

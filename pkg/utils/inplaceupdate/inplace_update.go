@@ -686,13 +686,9 @@ func resourcePatchWithVersion(pod *corev1.Pod, containers []corev1.Container) st
 		utils.DumpJson(map[string]any{"containers": resourceContainersPatch(containers)}))
 }
 
-// IsInplaceUpdateCompleted 保留默认兼容合同：无记录或记录无法解析时视为已完成。
-// 目标收敛调用方须显式解析记录并使用模式方法；Ready 仍由 adapter 判断。
-func IsInplaceUpdateCompleted(ctx context.Context, pod *corev1.Pod) (bool, error) {
-	state, err := GetPodInPlaceUpdateState(pod)
-	if state == nil || err != nil {
-		return true, nil
-	}
+// IsInplaceUpdateCompleted 使用调用方已解析的状态检查更新是否完成，避免重复解析。
+// 无记录时视为已完成；Ready 仍由 adapter 判断。
+func IsInplaceUpdateCompleted(ctx context.Context, pod *corev1.Pod, state *InPlaceUpdateState) (bool, error) {
 	return CompatibilityMode.IsInplaceUpdateCompleted(ctx, pod, state)
 }
 
@@ -833,10 +829,8 @@ func checkPodResizeInfeasible(pod *corev1.Pod) error {
 
 func (mode UpdateMode) checkPodResizeInfeasible(pod *corev1.Pod) error {
 	failure := func(message string) error {
-		if mode == TargetConvergenceMode {
-			return &ResizeInfeasibleError{Message: message}
-		}
-		return fmt.Errorf("%s", message)
+		// 两种模式都保留结构化终态错误，供上层通过 errors.As 分类。
+		return &ResizeInfeasibleError{Message: message}
 	}
 	for _, cond := range pod.Status.Conditions {
 		if cond.Status != corev1.ConditionTrue {

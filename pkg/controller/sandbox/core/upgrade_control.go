@@ -500,7 +500,7 @@ func (r *UpgradeControl) performInplaceUpgrade(ctx context.Context, args EnsureF
 	if r.inplaceUpdateControl == nil {
 		return inplaceUpdateStepInProgress, fmt.Errorf("in-place upgrade is not configured for sandbox %s/%s", box.Namespace, box.Name)
 	}
-	return handleInPlaceUpdateCommon(ctx, r.inplaceUpdateControl, pod, box, args.NewStatus.UpdateRevision, inplaceupdate.TargetConvergenceMode)
+	return handleInPlaceUpdateCommon(ctx, r.inplaceUpdateControl, pod, box, args.NewStatus.UpdateRevision)
 }
 
 // performRecreateUpgrade handles the Recreate upgrade step (delete old pod + create new pod).

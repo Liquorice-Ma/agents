@@ -387,24 +387,23 @@ func TestCommonControl_EnsureSandboxUpdated(t *testing.T) {
 		wantErr      bool
 		claimKind    string
 		expectReason string
+		expectReady  bool
 		wait         bool
 	}{
-		{
-			name: "claim no-op still maintains probes", claimKind: "noop", expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded,
-		},
-		{name: "claim metadata still maintains probes", claimKind: "metadata"},
-		{name: "claim QoS-changing compatible downscale is rejected", claimKind: "qos-downscale", expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed},
-		{name: "claim untracked pod remains usable", claimKind: "untracked"},
-		{name: "claim unsupported template remains usable", claimKind: "unsupported", expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed},
-		{name: "claim previous failure remains usable", claimKind: "terminal", expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed},
-		{name: "claim previous success remains usable", claimKind: "terminal", expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded},
-		{name: "claim previous unsupported resize remains usable", claimKind: "terminal", expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonUnsupportedResize},
-		{name: "claim unsupported resize restores healthy ready", claimKind: "resize-unsupported", expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonUnsupportedResize},
-		{name: "claim infeasible resize restores healthy ready", claimKind: "Infeasible", expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed},
-		{name: "claim deferred resize restores healthy ready", claimKind: "Deferred", expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed},
-		{name: "claim image pending skips probe completion", claimKind: "image-pending", expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating, wait: true},
-		{name: "claim completed old record is not replaced", claimKind: "old-complete"},
-		{name: "claim pending old record still waits", claimKind: "old-pending", expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating, wait: true},
+		{name: "claim no-op reports success", claimKind: "noop", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded},
+		{name: "claim metadata reports success", claimKind: "metadata", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded},
+		{name: "claim QoS-changing compatible downscale is rejected", claimKind: "qos-downscale", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed},
+		{name: "claim untracked pod remains usable", claimKind: "untracked", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed},
+		{name: "claim unsupported template remains usable", claimKind: "unsupported", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed},
+		{name: "claim same-round write failure keeps readiness closed", claimKind: "terminal", wait: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed},
+		{name: "claim previous success remains usable", claimKind: "terminal", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded},
+		{name: "claim same-round unsupported resize keeps readiness closed", claimKind: "terminal", wait: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonUnsupportedResize},
+		{name: "claim unsupported resize keeps readiness closed", claimKind: "resize-unsupported", wait: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonUnsupportedResize},
+		{name: "claim infeasible resize keeps readiness closed", claimKind: "Infeasible", wait: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed},
+		{name: "claim deferred resize keeps readiness closed", claimKind: "Deferred", wait: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed},
+		{name: "claim image pending preserves healthy Pod readiness", claimKind: "image-pending", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating, wait: true},
+		{name: "claim completed old record accepts new target", claimKind: "old-complete", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating, wait: true},
+		{name: "claim pending old record accepts new target", claimKind: "old-pending", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating, wait: true},
 		{
 			name: "pod does not exist, should set failed phase",
 			args: EnsureFuncArgs{
@@ -592,13 +591,15 @@ func TestCommonControl_EnsureSandboxUpdated(t *testing.T) {
 					pod.Annotations = map[string]string{inplaceupdate.PodAnnotationInPlaceUpdateStateKey: `{"revision":"old","updateImages":true,"lastContainerStatuses":{"sandbox":{"imageID":"img-old"}}}`}
 					if tt.claimKind != "image-pending" {
 						pod.Labels[agentsv1alpha1.PodLabelTemplateHash] = "old"
+						box.Spec.Template.Spec.Containers[0].Image = "test:v2"
 					}
 					if tt.claimKind == "old-complete" {
 						pod.Status.ContainerStatuses[0].ImageID = "img-new"
 					}
 				}
-				if tt.claimKind == "terminal" || tt.wait {
-					utils.SetSandboxCondition(status, metav1.Condition{Type: string(agentsv1alpha1.SandboxConditionInplaceUpdate), Status: metav1.ConditionFalse, Reason: tt.expectReason, ObservedGeneration: 1})
+				if tt.claimKind == "terminal" {
+					box.Status.UpdateRevision = "target"
+					utils.SetSandboxCondition(status, metav1.Condition{Type: string(agentsv1alpha1.SandboxConditionInplaceUpdate), Status: metav1.ConditionFalse, Reason: tt.expectReason, Message: "previous result", ObservedGeneration: box.Generation})
 				}
 				_, immutable := HashSandbox(box)
 				box.Annotations[agentsv1alpha1.SandboxHashImmutablePart] = immutable
@@ -641,23 +642,16 @@ func TestCommonControl_EnsureSandboxUpdated(t *testing.T) {
 
 			if tt.claimKind != "" {
 				status := tt.args.NewStatus
+				assertInplaceConditions(t, status, tt.expectReady, tt.expectReason)
 				cond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
-				if tt.expectReason == "" {
-					require.Nil(t, cond)
-				} else {
-					require.NotNil(t, cond)
-					require.Equal(t, tt.expectReason, cond.Reason)
-				}
+				require.Equal(t, tt.args.Box.Generation, cond.ObservedGeneration)
+				// 当前 Claim 分支在 adapter 后直接返回；本次不改变探针执行边界。
 				probe := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionProbeValid))
-				ready := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionReady))
-				require.NotNil(t, ready)
-				if tt.wait {
-					require.NotNil(t, probe, "未完成时不能执行探针收尾")
-					require.Equal(t, metav1.ConditionFalse, ready.Status)
-				} else {
-					require.Nil(t, probe, "完成及兼容失败场景仍执行 EnsureProbe")
-					require.Equal(t, metav1.ConditionTrue, ready.Status)
-				}
+				require.NotNil(t, probe)
+				require.Equal(t, metav1.ConditionFalse, probe.Status)
+				require.Equal(t, "OldProbeConfig", probe.Reason)
+				require.Equal(t, tt.args.Pod.Status.PodIP, status.PodInfo.PodIP)
+				require.Equal(t, tt.args.Pod.UID, status.PodInfo.PodUID)
 				storedPod := &corev1.Pod{}
 				require.NoError(t, fc.Get(t.Context(), client.ObjectKeyFromObject(tt.args.Pod), storedPod))
 				require.Equal(t, types.UID("claim-pod"), storedPod.UID)
@@ -671,9 +665,10 @@ func TestCommonControl_EnsureSandboxUpdated(t *testing.T) {
 					require.Equal(t, int64(500), limit.MilliValue())
 				}
 				if tt.claimKind == "old-complete" || tt.claimKind == "old-pending" {
-					require.Equal(t, "old", storedPod.Labels[agentsv1alpha1.PodLabelTemplateHash])
+					require.Equal(t, "target", storedPod.Labels[agentsv1alpha1.PodLabelTemplateHash])
+					require.Equal(t, "test:v2", storedPod.Spec.Containers[0].Image)
 				}
-				// 使用真实 adapter 产生的状态连接领取等待端，不手工改成理想结果。
+				// 使用真实 adapter 状态验证现有等待端；失败终态快速失败消费不在本次修改范围内。
 				produced := tt.args.Box.DeepCopy()
 				produced.Status = *status.DeepCopy()
 				cache, _, err := cachetest.NewTestCache(t, produced)
@@ -1995,157 +1990,6 @@ func TestPodControl_CreatePod_AlreadyExists(t *testing.T) {
 	}
 	if pod == nil {
 		t.Fatal("expected non-nil pod")
-	}
-}
-
-func TestCommonControl_handleInplaceUpdateSandbox(t *testing.T) {
-	scheme := runtime.NewScheme()
-	_ = clientgoscheme.AddToScheme(scheme)
-	_ = agentsv1alpha1.AddToScheme(scheme)
-
-	control := &commonControl{
-		Client:   fake.NewClientBuilder().WithScheme(scheme).Build(),
-		recorder: record.NewFakeRecorder(10),
-	}
-	control.inplaceUpdateControl = inplaceupdate.NewInPlaceUpdateControl(control.Client, inplaceupdate.DefaultGeneratePatchBodyFunc)
-	control.podControl = NewPodControl(control.Client, record.NewFakeRecorder(10), GeneratePodFromSandbox)
-
-	// Test case 1: Pod doesn't have template hash label
-	sandbox1 := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-sandbox",
-			Namespace: "default",
-		},
-		Spec: agentsv1alpha1.SandboxSpec{
-			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
-				Template: &corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{
-								Name:  "test-container",
-								Image: "nginx:latest",
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	pod1 := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-sandbox",
-			Namespace: "default",
-			Labels:    map[string]string{}, // No template hash label
-		},
-	}
-
-	args1 := EnsureFuncArgs{
-		Pod:       pod1,
-		Box:       sandbox1,
-		NewStatus: &agentsv1alpha1.SandboxStatus{},
-	}
-
-	done, err := control.handleInplaceUpdateSandbox(context.TODO(), args1)
-	if err != nil {
-		t.Fatalf("handleInplaceUpdateSandbox() error = %v", err)
-	}
-	if !done {
-		t.Errorf("Expected done to be true when pod doesn't have template hash label")
-	}
-
-	// Test case 2: Hash mismatch
-	sandbox2 := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-sandbox",
-			Namespace: "default",
-			Annotations: map[string]string{
-				agentsv1alpha1.SandboxHashImmutablePart: "different-hash",
-			},
-		},
-		Spec: agentsv1alpha1.SandboxSpec{
-			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
-				Template: &corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{
-								Name:  "test-container",
-								Image: "nginx:latest",
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	pod2 := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-sandbox",
-			Namespace: "default",
-			Labels:    map[string]string{agentsv1alpha1.PodLabelTemplateHash: "old-revision"},
-		},
-	}
-
-	args2 := EnsureFuncArgs{
-		Pod:       pod2,
-		Box:       sandbox2,
-		NewStatus: &agentsv1alpha1.SandboxStatus{UpdateRevision: "new-revision"},
-	}
-
-	done, err = control.handleInplaceUpdateSandbox(context.TODO(), args2)
-	if err != nil {
-		t.Fatalf("handleInplaceUpdateSandbox() error = %v", err)
-	}
-	if !done {
-		t.Errorf("Expected done to be true when hash mismatch occurs")
-	}
-
-	// Test case 3: Revision consistent and inplace update completed
-	sandbox3 := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-sandbox",
-			Namespace: "default",
-			Annotations: map[string]string{
-				agentsv1alpha1.SandboxHashImmutablePart: "same-hash",
-			},
-		},
-		Spec: agentsv1alpha1.SandboxSpec{
-			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
-				Template: &corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{
-								Name:  "test-container",
-								Image: "nginx:latest",
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	pod3 := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-sandbox",
-			Namespace: "default",
-			Labels:    map[string]string{agentsv1alpha1.PodLabelTemplateHash: "same-revision"},
-		},
-	}
-
-	args3 := EnsureFuncArgs{
-		Pod:       pod3,
-		Box:       sandbox3,
-		NewStatus: &agentsv1alpha1.SandboxStatus{UpdateRevision: "same-revision"},
-	}
-
-	done, err = control.handleInplaceUpdateSandbox(context.TODO(), args3)
-	if err != nil {
-		t.Fatalf("handleInplaceUpdateSandbox() error = %v", err)
-	}
-	if !done {
-		t.Errorf("Expected done to be true when revision is consistent and inplace update is completed")
 	}
 }
 

@@ -972,7 +972,7 @@ func TestInPlaceUpdateControl_Update_ResizeConflictRetryNoLongerNeeded(t *testin
 				require.True(t, completed)
 			} else {
 				require.Nil(t, state, "兼容模式保留 Conflict 重算后无需 resize 的原有结果")
-				completed, err := IsInplaceUpdateCompleted(t.Context(), updated)
+				completed, err := IsInplaceUpdateCompleted(t.Context(), updated, state)
 				require.NoError(t, err)
 				require.True(t, completed)
 			}
@@ -2152,13 +2152,13 @@ func TestIsInplaceUpdateCompleted(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, parseErr := GetPodInPlaceUpdateState(tt.pod)
+			state, parseErr := GetPodInPlaceUpdateState(tt.pod)
 			if tt.expectParseErr {
 				require.Error(t, parseErr)
-			} else {
-				require.NoError(t, parseErr)
+				return
 			}
-			completed, terminalErr := IsInplaceUpdateCompleted(context.TODO(), tt.pod)
+			require.NoError(t, parseErr)
+			completed, terminalErr := IsInplaceUpdateCompleted(context.TODO(), tt.pod, state)
 			if completed != tt.expectedCompleted {
 				t.Errorf("Expected completed=%v, got %v", tt.expectedCompleted, completed)
 			}
@@ -2304,7 +2304,7 @@ func TestIsInplaceUpdateCompletedWithResourceConditions(t *testing.T) {
 		},
 	}
 
-	completed, terminalErr := IsInplaceUpdateCompleted(context.Background(), pod)
+	completed, terminalErr := IsInplaceUpdateCompleted(context.Background(), pod, state)
 	if completed {
 		t.Fatalf("expected incomplete while PodResizeInProgress is true")
 	}
@@ -2313,7 +2313,7 @@ func TestIsInplaceUpdateCompletedWithResourceConditions(t *testing.T) {
 	}
 
 	pod.Status.Conditions = nil
-	completed, terminalErr = IsInplaceUpdateCompleted(context.Background(), pod)
+	completed, terminalErr = IsInplaceUpdateCompleted(context.Background(), pod, state)
 	if completed {
 		t.Fatalf("expected incomplete when no resize signal and no applied resources")
 	}
@@ -2322,7 +2322,7 @@ func TestIsInplaceUpdateCompletedWithResourceConditions(t *testing.T) {
 	}
 
 	pod.Status.Resize = corev1.PodResizeStatusInProgress
-	completed, terminalErr = IsInplaceUpdateCompleted(context.Background(), pod)
+	completed, terminalErr = IsInplaceUpdateCompleted(context.Background(), pod, state)
 	if completed {
 		t.Fatalf("expected incomplete while resize status is in progress")
 	}
@@ -2337,7 +2337,7 @@ func TestIsInplaceUpdateCompletedWithResourceConditions(t *testing.T) {
 			Status: corev1.ConditionFalse,
 		},
 	}
-	completed, terminalErr = IsInplaceUpdateCompleted(context.Background(), pod)
+	completed, terminalErr = IsInplaceUpdateCompleted(context.Background(), pod, state)
 	if completed {
 		t.Fatalf("expected incomplete when only resize signals exist but resources not applied")
 	}
@@ -2353,7 +2353,7 @@ func TestIsInplaceUpdateCompletedWithResourceConditions(t *testing.T) {
 			Reason: corev1.PodReasonInfeasible, Message: "insufficient cpu",
 		},
 	}
-	completed, terminalErr = IsInplaceUpdateCompleted(context.Background(), pod)
+	completed, terminalErr = IsInplaceUpdateCompleted(context.Background(), pod, state)
 	if completed {
 		t.Fatalf("expected incomplete when resize is infeasible")
 	}
@@ -2374,7 +2374,7 @@ func TestIsInplaceUpdateCompletedWithResourceConditions(t *testing.T) {
 			Message: "node resources temporarily insufficient",
 		},
 	}
-	completed, terminalErr = IsInplaceUpdateCompleted(context.Background(), pod)
+	completed, terminalErr = IsInplaceUpdateCompleted(context.Background(), pod, state)
 	if completed {
 		t.Fatalf("expected incomplete when resize is deferred")
 	}
@@ -2395,7 +2395,7 @@ func TestIsInplaceUpdateCompletedWithResourceConditions(t *testing.T) {
 			},
 		},
 	}
-	completed, terminalErr = IsInplaceUpdateCompleted(context.Background(), pod)
+	completed, terminalErr = IsInplaceUpdateCompleted(context.Background(), pod, state)
 	if !completed {
 		t.Fatalf("expected completed when resources are applied to container status")
 	}
@@ -2404,7 +2404,7 @@ func TestIsInplaceUpdateCompletedWithResourceConditions(t *testing.T) {
 	}
 	// 同一份超配 status：兼容模式已满足目标，SUO 必须等待降配生效。
 	pod.Status.ContainerStatuses[0].Resources.Requests[corev1.ResourceCPU] = resource.MustParse("1500m")
-	completed, terminalErr = IsInplaceUpdateCompleted(t.Context(), pod)
+	completed, terminalErr = IsInplaceUpdateCompleted(t.Context(), pod, state)
 	require.NoError(t, terminalErr)
 	require.True(t, completed)
 	completed, terminalErr = TargetConvergenceMode.IsInplaceUpdateCompleted(t.Context(), pod, state)
@@ -2544,9 +2544,14 @@ func Test_checkPodResizeInfeasible(t *testing.T) {
 			}
 			compatErr := checkPodResizeInfeasible(tt.pod)
 			if tt.wantErr || strings.Contains(tt.name, "Deferred") {
-				require.Error(t, compatErr)
 				var resizeErr *ResizeInfeasibleError
-				require.False(t, errors.As(compatErr, &resizeErr))
+				require.ErrorAs(t, compatErr, &resizeErr)
+				require.ErrorAs(t, fmt.Errorf("observation failed: %w", compatErr), &resizeErr)
+				if tt.wantErr {
+					require.EqualError(t, compatErr, err.Error())
+				} else {
+					require.Contains(t, compatErr.Error(), "deferred")
+				}
 			} else {
 				require.NoError(t, compatErr)
 			}
