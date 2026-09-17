@@ -483,9 +483,14 @@ func (r *commonControl) handleInplaceUpdateSandbox(ctx context.Context, args Ens
 			// old Pod do not include Labels[pod-template-hash] and do not support inplace update.
 			return true, nil
 		case inplaceClassUnsupportedChange:
+			msg := err.Error()
 			logger.Info("sandbox hash-immutable-part changed, and does not permit in-place upgrades", "sandbox", klog.KObj(box))
 			r.recorder.Eventf(box, corev1.EventTypeWarning, "InplaceUpdateForbidden",
 				"InplaceUpdate only support image, resources, metadata")
+			utils.SetSandboxCondition(newStatus, metav1.Condition{
+				Type: string(agentsv1alpha1.SandboxConditionInplaceUpdate), Status: metav1.ConditionFalse,
+				Reason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed, Message: utils.TruncateConditionMessage(msg), LastTransitionTime: metav1.Now(),
+			})
 			return true, nil
 		case inplaceClassRepeatedUpdate:
 			// currently, multiple in-place updates are not supported.

@@ -402,7 +402,7 @@ func TestCommonControl_EnsureSandboxUpdated(t *testing.T) {
 		{name: "claim metadata patches pod without conditions", claimKind: "metadata", expectReady: true},
 		{name: "claim QoS-changing compatible downscale is rejected", claimKind: "qos-downscale", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed, expectEvent: "InplaceUpdateFailed"},
 		{name: "claim untracked pod remains usable", claimKind: "untracked", expectReady: true},
-		{name: "claim unsupported template remains usable", claimKind: "unsupported", expectReady: true, expectEvent: "InplaceUpdateForbidden"},
+		{name: "claim unsupported template reports failure and remains usable", claimKind: "unsupported", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed, expectEvent: "InplaceUpdateForbidden"},
 		{name: "claim terminal failure is not re-evaluated", claimKind: "terminal", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed},
 		{name: "claim previous success remains usable", claimKind: "terminal", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded},
 		{name: "claim terminal unsupported resize is not re-evaluated", claimKind: "terminal", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonUnsupportedResize},
@@ -705,6 +705,10 @@ func TestCommonControl_EnsureSandboxUpdated(t *testing.T) {
 					limit := storedPod.Spec.Containers[0].Resources.Limits[corev1.ResourceCPU]
 					require.Equal(t, int64(500), request.MilliValue())
 					require.Equal(t, int64(500), limit.MilliValue())
+				case "unsupported":
+					condition := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
+					require.NotNil(t, condition)
+					require.NotEmpty(t, condition.Message)
 				case "old-complete", "old-pending":
 					// Claim never issues a second in-place round: the new target is
 					// left unapplied and the pod keeps the old revision.
