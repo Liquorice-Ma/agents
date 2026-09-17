@@ -516,10 +516,6 @@ func handleClaimInplaceUpdate(ctx context.Context, handler InPlaceUpdateHandler,
 		Type: string(agentsv1alpha1.SandboxConditionInplaceUpdate), Status: metav1.ConditionFalse,
 		Reason: agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating, LastTransitionTime: metav1.Now(),
 	})
-	utils.SetSandboxCondition(newStatus, metav1.Condition{
-		Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse,
-		Reason: agentsv1alpha1.SandboxReadyReasonInplaceUpdating, Message: "inplace update is incompleted", LastTransitionTime: metav1.Now(),
-	})
 	step, err := handleInPlaceUpdateCommon(ctx, handler.GetInPlaceUpdateControl(), pod, box, newStatus.UpdateRevision, inplaceupdate.CompatibilityMode)
 	if err != nil {
 		msg := err.Error()
