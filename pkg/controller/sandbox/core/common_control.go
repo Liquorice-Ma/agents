@@ -562,18 +562,19 @@ func (r *commonControl) handleInplaceUpdateSandbox(ctx context.Context, args Ens
 		return true, nil
 	}
 
-	// Start inplace update sandbox: gate Ready until the delivered round is
-	// observed complete.
+	// A delivered update may leave the old container serving while kubelet pulls
+	// the target image. Keep Ready derived from the existing Pod state; the
+	// separate InplaceUpdate condition reports that the target is not effective.
 	utils.SetSandboxCondition(newStatus, metav1.Condition{
 		Type: string(agentsv1alpha1.SandboxConditionInplaceUpdate), Status: metav1.ConditionFalse,
 		Reason: agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating, LastTransitionTime: metav1.Now(),
 	})
-	utils.SetSandboxCondition(newStatus, metav1.Condition{
-		Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse,
-		Reason: agentsv1alpha1.SandboxReadyReasonInplaceUpdating, Message: "inplace update is incompleted", LastTransitionTime: metav1.Now(),
-	})
 	if err != nil {
 		msg := err.Error()
+		utils.SetSandboxCondition(newStatus, metav1.Condition{
+			Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse,
+			Reason: agentsv1alpha1.SandboxReadyReasonInplaceUpdating, Message: "inplace update is incompleted", LastTransitionTime: metav1.Now(),
+		})
 		r.recorder.Eventf(box, corev1.EventTypeWarning, "InplaceUpdateFailed", msg)
 		reason := agentsv1alpha1.SandboxInplaceUpdateReasonFailed
 		if isUnsupportedResizeError(err) {
