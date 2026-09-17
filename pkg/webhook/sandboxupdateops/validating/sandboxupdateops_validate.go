@@ -158,7 +158,7 @@ func (h *SandboxUpdateOpsValidatingHandler) handleUpdate(req admission.Request, 
 	var errList field.ErrorList
 	specPath := field.NewPath("spec")
 
-	// Only allow changes to UpdateStrategy.MaxUnavailable, Paused, and StateFilter
+	// Only allow changes to UpdateStrategy, Paused, and StateFilter
 	if !reflect.DeepEqual(oldObj.Spec.Selector, newObj.Spec.Selector) {
 		errList = append(errList, field.Forbidden(specPath.Child("selector"), "selector is immutable"))
 	}
@@ -168,11 +168,15 @@ func (h *SandboxUpdateOpsValidatingHandler) handleUpdate(req admission.Request, 
 	if !reflect.DeepEqual(oldObj.Spec.Lifecycle, newObj.Spec.Lifecycle) {
 		errList = append(errList, field.Forbidden(specPath.Child("lifecycle"), "lifecycle is immutable"))
 	}
-	// Changing the strategy type mid-flight is semantically incorrect:
-	// already-patched sandboxes follow the old strategy while unpatched ones
-	// would follow the new one.
-	if oldObj.Spec.UpdateStrategy.Type != newObj.Spec.UpdateStrategy.Type {
-		errList = append(errList, field.Forbidden(specPath.Child("updateStrategy", "type"), "updateStrategy.type is immutable"))
+	// Recreate and CheckpointRestore both replace the Pod, so switching between
+	// them mid-flight is tolerated as before. InplaceUpdate instead drives the
+	// sandbox through the in-place upgrade lifecycle, and already-patched
+	// sandboxes would follow a different mechanism from unpatched ones, so any
+	// switch to or from it is rejected.
+	oldType, newType := oldObj.Spec.UpdateStrategy.Type, newObj.Spec.UpdateStrategy.Type
+	if oldType != newType &&
+		(oldType == agentsv1alpha1.SandboxUpdateOpsStrategyInplaceUpdate || newType == agentsv1alpha1.SandboxUpdateOpsStrategyInplaceUpdate) {
+		errList = append(errList, field.Forbidden(specPath.Child("updateStrategy", "type"), "updateStrategy.type cannot be changed to or from InplaceUpdate"))
 	}
 
 	if len(errList) > 0 {

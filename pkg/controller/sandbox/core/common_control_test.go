@@ -17,6 +17,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -381,6 +382,12 @@ func TestCommonControl_EnsureSandboxUpdated(t *testing.T) {
 	_ = clientgoscheme.AddToScheme(scheme)
 	_ = agentsv1alpha1.AddToScheme(scheme)
 
+	// Claim cases exercise the SandboxClaim delivery path (no UpgradePolicy).
+	// expectReason "" means no InplaceUpdate condition may be written. wait
+	// means the adapter reports done=false: EnsureSandboxUpdated must
+	// early-return, leaving Ready=False/InplaceUpdating, the stale ProbeValid
+	// verdict and PodInfo untouched. Otherwise the Running path resumes: the
+	// probe manager drops the stale verdict and Ready follows the Pod.
 	tests := []struct {
 		name         string
 		args         EnsureFuncArgs
@@ -389,21 +396,22 @@ func TestCommonControl_EnsureSandboxUpdated(t *testing.T) {
 		expectReason string
 		expectReady  bool
 		wait         bool
+		expectEvent  string
 	}{
-		{name: "claim no-op reports success", claimKind: "noop", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded},
-		{name: "claim metadata reports success", claimKind: "metadata", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded},
-		{name: "claim QoS-changing compatible downscale is rejected", claimKind: "qos-downscale", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed},
-		{name: "claim untracked pod remains usable", claimKind: "untracked", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed},
-		{name: "claim unsupported template remains usable", claimKind: "unsupported", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed},
-		{name: "claim same-round write failure keeps readiness closed", claimKind: "terminal", wait: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed},
+		{name: "claim no-op reports success and resumes status sync", claimKind: "noop", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded},
+		{name: "claim metadata patches pod without conditions", claimKind: "metadata", expectReady: true},
+		{name: "claim QoS-changing compatible downscale is rejected", claimKind: "qos-downscale", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed, expectEvent: "InplaceUpdateFailed"},
+		{name: "claim untracked pod remains usable", claimKind: "untracked", expectReady: true},
+		{name: "claim unsupported template remains usable", claimKind: "unsupported", expectReady: true, expectEvent: "InplaceUpdateForbidden"},
+		{name: "claim terminal failure is not re-evaluated", claimKind: "terminal", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed},
 		{name: "claim previous success remains usable", claimKind: "terminal", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded},
-		{name: "claim same-round unsupported resize keeps readiness closed", claimKind: "terminal", wait: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonUnsupportedResize},
-		{name: "claim unsupported resize keeps readiness closed", claimKind: "resize-unsupported", wait: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonUnsupportedResize},
-		{name: "claim infeasible resize keeps readiness closed", claimKind: "Infeasible", wait: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed},
-		{name: "claim deferred resize keeps readiness closed", claimKind: "Deferred", wait: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed},
-		{name: "claim image pending preserves healthy Pod readiness", claimKind: "image-pending", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating, wait: true},
-		{name: "claim completed old record accepts new target", claimKind: "old-complete", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating, wait: true},
-		{name: "claim pending old record accepts new target", claimKind: "old-pending", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating, wait: true},
+		{name: "claim terminal unsupported resize is not re-evaluated", claimKind: "terminal", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonUnsupportedResize},
+		{name: "claim unsupported resize is terminal and keeps pod usable", claimKind: "resize-unsupported", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonUnsupportedResize, expectEvent: "InplaceUpdateFailed"},
+		{name: "claim infeasible resize fails and keeps pod usable", claimKind: "Infeasible", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed, expectEvent: "InplaceUpdateFailed"},
+		{name: "claim deferred resize fails and keeps pod usable", claimKind: "Deferred", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed, expectEvent: "InplaceUpdateFailed"},
+		{name: "claim image pending keeps readiness closed", claimKind: "image-pending", wait: true},
+		{name: "claim completed old record ignores new target", claimKind: "old-complete", expectReady: true, expectEvent: "InplaceUpdateForbidden"},
+		{name: "claim pending old record waits for it", claimKind: "old-pending", wait: true, expectEvent: "InplaceUpdateForbidden"},
 		{
 			name: "pod does not exist, should set failed phase",
 			args: EnsureFuncArgs{
@@ -599,7 +607,11 @@ func TestCommonControl_EnsureSandboxUpdated(t *testing.T) {
 				}
 				if tt.claimKind == "terminal" {
 					box.Status.UpdateRevision = "target"
-					utils.SetSandboxCondition(status, metav1.Condition{Type: string(agentsv1alpha1.SandboxConditionInplaceUpdate), Status: metav1.ConditionFalse, Reason: tt.expectReason, Message: "previous result", ObservedGeneration: box.Generation})
+					priorStatus := metav1.ConditionFalse
+					if tt.expectReason == agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded {
+						priorStatus = metav1.ConditionTrue
+					}
+					utils.SetSandboxCondition(status, metav1.Condition{Type: string(agentsv1alpha1.SandboxConditionInplaceUpdate), Status: priorStatus, Reason: tt.expectReason, ObservedGeneration: box.Generation})
 				}
 				_, immutable := HashSandbox(box)
 				box.Annotations[agentsv1alpha1.SandboxHashImmutablePart] = immutable
@@ -625,9 +637,10 @@ func TestCommonControl_EnsureSandboxUpdated(t *testing.T) {
 					t.Fatalf("create pod failed: %s", err.Error())
 				}
 			}
+			recorder := record.NewFakeRecorder(20)
 			control := &commonControl{
 				Client:               fc,
-				recorder:             record.NewFakeRecorder(10),
+				recorder:             recorder,
 				inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fc, inplaceupdate.DefaultGeneratePatchBodyFunc),
 				podControl:           NewPodControl(fc, record.NewFakeRecorder(10), GeneratePodFromSandbox),
 				probeManager:         NewPodProbeManager(fc, record.NewFakeRecorder(10)),
@@ -642,33 +655,64 @@ func TestCommonControl_EnsureSandboxUpdated(t *testing.T) {
 
 			if tt.claimKind != "" {
 				status := tt.args.NewStatus
-				assertInplaceConditions(t, status, tt.expectReady, tt.expectReason)
-				cond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
-				require.Equal(t, tt.args.Box.Generation, cond.ObservedGeneration)
-				// 当前 Claim 分支在 adapter 后直接返回；本次不改变探针执行边界。
+				if tt.expectReason == "" {
+					require.Nil(t, utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionInplaceUpdate)))
+					ready := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionReady))
+					require.NotNil(t, ready)
+					if tt.expectReady {
+						require.Equal(t, metav1.ConditionTrue, ready.Status)
+					} else {
+						require.Equal(t, metav1.ConditionFalse, ready.Status)
+						require.Equal(t, agentsv1alpha1.SandboxReadyReasonInplaceUpdating, ready.Reason)
+					}
+				} else {
+					assertInplaceConditions(t, status, tt.expectReady, tt.expectReason)
+				}
+				// done=true resumes the Running path: EnsureProbe drops the stale
+				// ProbeValid verdict (no probes configured) and syncStatusFromPod
+				// fills PodInfo. done=false early-returns and leaves both untouched.
 				probe := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionProbeValid))
-				require.NotNil(t, probe)
-				require.Equal(t, metav1.ConditionFalse, probe.Status)
-				require.Equal(t, "OldProbeConfig", probe.Reason)
-				require.Equal(t, tt.args.Pod.Status.PodIP, status.PodInfo.PodIP)
-				require.Equal(t, tt.args.Pod.UID, status.PodInfo.PodUID)
+				if tt.wait {
+					require.NotNil(t, probe)
+					require.Equal(t, "OldProbeConfig", probe.Reason)
+					require.Empty(t, status.PodInfo.PodUID)
+				} else {
+					require.Nil(t, probe)
+					require.Equal(t, tt.args.Pod.UID, status.PodInfo.PodUID)
+					require.Equal(t, tt.args.Pod.Status.PodIP, status.SandboxIp)
+				}
+				var events []string
+				for drained := false; !drained; {
+					select {
+					case event := <-recorder.Events:
+						events = append(events, event)
+					default:
+						drained = true
+					}
+				}
+				if tt.expectEvent != "" {
+					require.Contains(t, strings.Join(events, "\n"), tt.expectEvent)
+				}
 				storedPod := &corev1.Pod{}
 				require.NoError(t, fc.Get(t.Context(), client.ObjectKeyFromObject(tt.args.Pod), storedPod))
 				require.Equal(t, types.UID("claim-pod"), storedPod.UID)
-				if tt.claimKind == "metadata" {
+				switch tt.claimKind {
+				case "metadata":
 					require.Equal(t, "new", storedPod.Labels["claim-metadata"])
-				}
-				if tt.claimKind == "qos-downscale" {
+					require.Equal(t, "target", storedPod.Labels[agentsv1alpha1.PodLabelTemplateHash])
+				case "qos-downscale":
 					request := storedPod.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]
 					limit := storedPod.Spec.Containers[0].Resources.Limits[corev1.ResourceCPU]
 					require.Equal(t, int64(500), request.MilliValue())
 					require.Equal(t, int64(500), limit.MilliValue())
+				case "old-complete", "old-pending":
+					// Claim never issues a second in-place round: the new target is
+					// left unapplied and the pod keeps the old revision.
+					require.Equal(t, "old", storedPod.Labels[agentsv1alpha1.PodLabelTemplateHash])
+					require.Equal(t, "test:v1", storedPod.Spec.Containers[0].Image)
 				}
-				if tt.claimKind == "old-complete" || tt.claimKind == "old-pending" {
-					require.Equal(t, "target", storedPod.Labels[agentsv1alpha1.PodLabelTemplateHash])
-					require.Equal(t, "test:v2", storedPod.Spec.Containers[0].Image)
-				}
-				// 使用真实 adapter 状态验证现有等待端；失败终态快速失败消费不在本次修改范围内。
+				// The produced status must agree with the cache-side wait: only an
+				// early-returned round keeps Ready closed.
 				produced := tt.args.Box.DeepCopy()
 				produced.Status = *status.DeepCopy()
 				cache, _, err := cachetest.NewTestCache(t, produced)

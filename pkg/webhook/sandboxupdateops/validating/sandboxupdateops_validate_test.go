@@ -508,13 +508,30 @@ func TestCreate_InplaceUpdateWithLifecycle_Allowed(t *testing.T) {
 	require.True(t, resp.Allowed)
 }
 
-func TestUpdate_ChangeStrategyType_Rejected(t *testing.T) {
-	oldObj := validOps()
-	oldObj.Spec.UpdateStrategy.Type = v1alpha1.SandboxUpdateOpsStrategyRecreate
-	newObj := oldObj.DeepCopy()
-	newObj.Spec.UpdateStrategy.Type = v1alpha1.SandboxUpdateOpsStrategyInplaceUpdate
-	h := newTestHandler()
-	resp := h.Handle(context.TODO(), makeUpdateRequest(t, oldObj, newObj))
-	require.False(t, resp.Allowed)
-	require.Contains(t, resp.Result.Message, "updateStrategy.type is immutable")
+func TestUpdate_ChangeStrategyType(t *testing.T) {
+	tests := []struct {
+		name    string
+		oldType v1alpha1.SandboxUpdateOpsStrategyType
+		newType v1alpha1.SandboxUpdateOpsStrategyType
+		allowed bool
+	}{
+		{name: "recreate to checkpoint-restore is allowed", oldType: v1alpha1.SandboxUpdateOpsStrategyRecreate, newType: v1alpha1.SandboxUpdateOpsStrategyCheckpointRestore, allowed: true},
+		{name: "checkpoint-restore to recreate is allowed", oldType: v1alpha1.SandboxUpdateOpsStrategyCheckpointRestore, newType: v1alpha1.SandboxUpdateOpsStrategyRecreate, allowed: true},
+		{name: "recreate to inplace-update is rejected", oldType: v1alpha1.SandboxUpdateOpsStrategyRecreate, newType: v1alpha1.SandboxUpdateOpsStrategyInplaceUpdate},
+		{name: "inplace-update to checkpoint-restore is rejected", oldType: v1alpha1.SandboxUpdateOpsStrategyInplaceUpdate, newType: v1alpha1.SandboxUpdateOpsStrategyCheckpointRestore},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			oldObj := validOps()
+			oldObj.Spec.UpdateStrategy.Type = tt.oldType
+			newObj := oldObj.DeepCopy()
+			newObj.Spec.UpdateStrategy.Type = tt.newType
+			h := newTestHandler()
+			resp := h.Handle(context.TODO(), makeUpdateRequest(t, oldObj, newObj))
+			require.Equal(t, tt.allowed, resp.Allowed)
+			if !tt.allowed {
+				require.Contains(t, resp.Result.Message, "updateStrategy.type cannot be changed to or from InplaceUpdate")
+			}
+		})
+	}
 }

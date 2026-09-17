@@ -39,6 +39,9 @@ const (
 	inplaceClassUnsupportedChange
 	inplaceClassQoSRejected
 	inplaceClassStateCorrupted
+	// The pod already completed an earlier round and the caller's policy forbids
+	// a second one; the new target was ignored and nothing was written.
+	inplaceClassRepeatedUpdate
 )
 
 // inplaceUpdateError is the single error type the engine returns for
@@ -110,7 +113,8 @@ func isUnsupportedResizeError(err error) bool {
 type inplaceUpdateStepResult int
 
 const (
-	// Pre-check failed; this write has not been issued yet.
+	// Pre-check failed, or the caller's policy is still waiting for an earlier
+	// round to finish; this write has not been issued yet.
 	inplaceUpdateStepInProgress inplaceUpdateStepResult = iota
 	// A write has been attempted or is waiting to take effect, including write
 	// failures and partially successful writes.
@@ -118,8 +122,37 @@ const (
 	inplaceUpdateStepSucceeded
 )
 
+// inplaceEngineOptions carries the per-path policy choices the shared engine
+// must not decide on its own. Each adapter passes its own fixed value so a
+// change in one path can never silently alter the other.
+type inplaceEngineOptions struct {
+	// QoSMode selects the resize QoS pre-check algorithm. It must match the mode
+	// the underlying control writes with, otherwise validation and execution
+	// disagree on which requests are accepted.
+	QoSMode inplaceupdate.UpdateMode
+	// RejectRepeatedUpdate keeps the legacy claim rule ("multiple in-place
+	// updates are not supported"): a pod that already carries an in-place update
+	// record waits for that round to finish and never receives a second one.
+	// When false, a new target may supersede an unfinished round.
+	RejectRepeatedUpdate bool
+}
+
+var (
+	// claimInplaceEngineOptions reproduces the pre-SUO claim delivery behavior.
+	claimInplaceEngineOptions = inplaceEngineOptions{
+		QoSMode:              inplaceupdate.CompatibilityMode,
+		RejectRepeatedUpdate: true,
+	}
+	// upgradeInplaceEngineOptions lets a new SUO correct an unfinished target.
+	upgradeInplaceEngineOptions = inplaceEngineOptions{
+		QoSMode: inplaceupdate.TargetConvergenceMode,
+	}
+)
+
 // SUO 在 UpgradePod 的实际写入前校验；不改变共享 PreUpgrade 的执行时机。
-// 未完成的上一轮更新不阻止修正目标。
+// The QoS pre-check is deliberately not part of this step: it only guards a
+// write, so it runs after the caller's repeated-update policy has decided that
+// a write will actually be attempted.
 func validateInplaceUpdate(pod *corev1.Pod, box *agentsv1alpha1.Sandbox) (*inplaceupdate.InPlaceUpdateState, error) {
 	if pod.Labels[agentsv1alpha1.PodLabelTemplateHash] == "" {
 		return nil, newInplaceError(inplaceClassUntrackedPod, "pod has no template-hash label and does not support in-place update")
@@ -132,16 +165,13 @@ func validateInplaceUpdate(pod *corev1.Pod, box *agentsv1alpha1.Sandbox) (*inpla
 	if err != nil {
 		return nil, wrapInplaceError(inplaceClassStateCorrupted, "cannot determine in-place update progress", err)
 	}
-	if orig, target, changed := inplaceupdate.TargetConvergenceMode.CheckResizeQoSChange(box, pod); changed {
-		return nil, newInplaceError(inplaceClassQoSRejected, fmt.Sprintf("resource resize would change QoS class from %s to %s, resize rejected", orig, target))
-	}
 	return state, nil
 }
 
 // Configuration taking effect and final Ready are judged separately; the wait
 // diagnostics are produced by the adapter based on Pod status.
 func handleInPlaceUpdateCommon(ctx context.Context, control *inplaceupdate.InPlaceUpdateControl,
-	pod *corev1.Pod, box *agentsv1alpha1.Sandbox, targetRevision string,
+	pod *corev1.Pod, box *agentsv1alpha1.Sandbox, targetRevision string, engineOpts inplaceEngineOptions,
 ) (inplaceUpdateStepResult, error) {
 	if err := ctx.Err(); err != nil {
 		return inplaceUpdateStepInProgress, wrapInplaceError(inplaceClassUpdateFailed, "update cancelled", err)
@@ -156,7 +186,33 @@ func handleInPlaceUpdateCommon(ctx context.Context, control *inplaceupdate.InPla
 		return observeInplaceUpdate(ctx, pod, state)
 	}
 
+	// An earlier round is still recorded on the pod. Whether the new target may
+	// supersede it is the caller's policy; either way an unfinished earlier round
+	// must not let a metadata-only write report success before it takes effect.
+	previousPending := false
+	if state != nil {
+		completed, completedErr := inplaceupdate.IsInplaceUpdateCompleted(ctx, pod, state)
+		// A terminal failure of the earlier round means it will never complete;
+		// treat it as pending so the policy below decides what happens to it.
+		previousPending = !completed || completedErr != nil
+		if engineOpts.RejectRepeatedUpdate {
+			if previousPending {
+				// Nothing written and no error: the only InProgress outcome without
+				// an error, so callers can tell "waiting for the earlier round" apart
+				// from a rejected pre-check.
+				return inplaceUpdateStepInProgress, nil
+			}
+			return inplaceUpdateStepInProgress, newInplaceError(inplaceClassRepeatedUpdate, "currently, multiple in-place updates are not supported")
+		}
+	}
+
 	metadataOnly := isMetadataOnlyChange(pod, box)
+	if !metadataOnly {
+		if orig, target, changed := engineOpts.QoSMode.CheckResizeQoSChange(box, pod); changed {
+			return inplaceUpdateStepInProgress, newInplaceError(inplaceClassQoSRejected,
+				fmt.Sprintf("resource resize would change QoS class from %s to %s, resize rejected", orig, target))
+		}
+	}
 	// 直接下发新目标，保留现有底层更新模式及 metadata 快速路径。
 	opts := inplaceupdate.InPlaceUpdateOptions{
 		Pod:      pod,
@@ -164,12 +220,14 @@ func handleInPlaceUpdateCommon(ctx context.Context, control *inplaceupdate.InPla
 		Revision: targetRevision,
 	}
 	patchCtx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerPatchPod)
-	_, err = control.Update(patchCtx, opts)
+	changed, err := control.Update(patchCtx, opts)
 	tracing.EndSpan(patchCtx, span, err)
 	if err != nil {
 		return inplaceUpdateStepPatchDelivered, wrapInplaceError(inplaceClassUpdateFailed, "cannot deliver in-place update", err)
 	}
-	if metadataOnly {
+	// Nothing needed writing: the pod already matches the target, so there is
+	// no later observation to wait for.
+	if !changed || (metadataOnly && !previousPending) {
 		return inplaceUpdateStepSucceeded, nil
 	}
 	return inplaceUpdateStepPatchDelivered, nil

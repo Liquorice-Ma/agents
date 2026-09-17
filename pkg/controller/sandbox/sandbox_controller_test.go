@@ -5965,22 +5965,20 @@ func TestReconcile_ErrorPath_UpdatesSandboxStatus(t *testing.T) {
 	if patchCallCount == 0 {
 		t.Error("Expected at least one Pod patch attempt")
 	}
-	// The error branch must persist the retryable update state, not just return
-	// the error. An unknown Pod patch failure remains InplaceUpdating so the
-	// reconciler can retry it instead of recording a terminal failure.
+	// The error branch must persist the update state, not just return the
+	// error: the claim adapter records the write failure on the InplaceUpdate
+	// condition and keeps Ready closed until the retried write succeeds.
 	stored := &agentsv1alpha1.Sandbox{}
 	require.NoError(t, fakeClient.Get(t.Context(), req.NamespacedName, stored))
 	cond := utils.GetSandboxCondition(&stored.Status, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
 	require.NotNil(t, cond)
 	require.Equal(t, metav1.ConditionFalse, cond.Status)
-	require.Equal(t, agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating, cond.Reason)
-	require.Equal(t, stored.Generation, cond.ObservedGeneration)
+	require.Equal(t, agentsv1alpha1.SandboxInplaceUpdateReasonFailed, cond.Reason)
 	require.Contains(t, cond.Message, "simulated pod patch failure")
 	ready := utils.GetSandboxCondition(&stored.Status, string(agentsv1alpha1.SandboxConditionReady))
 	require.NotNil(t, ready)
 	require.Equal(t, metav1.ConditionFalse, ready.Status)
 	require.Equal(t, agentsv1alpha1.SandboxReadyReasonInplaceUpdating, ready.Reason)
-	require.Contains(t, ready.Message, "simulated pod patch failure")
 	require.Equal(t, agentsv1alpha1.SandboxRunning, stored.Status.Phase)
 }
 

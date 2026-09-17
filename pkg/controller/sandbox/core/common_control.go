@@ -183,13 +183,16 @@ func (r *commonControl) EnsureSandboxUpdated(ctx context.Context, args EnsureFun
 	// Every explicit upgrade policy — including InplaceUpdate — is excluded here
 	// because it runs through the Upgrading phase instead.
 	if !RequiresUpgradeSandbox(box) {
-		_, err := r.handleInplaceUpdateSandbox(ctx, args)
-		// done covers both success and terminal failure, so it must not be used to
-		// override the Ready set by the adapter.
-		// args.Pod may be the pre-patch object; only sync status info here, and the
-		// Pod watch will trigger later observations.
-		r.syncStatusFromPod(pod, newStatus, false)
-		return err
+		done, err := r.handleInplaceUpdateSandbox(ctx, args)
+		if err != nil {
+			return err
+		}
+		if !done {
+			// In-place update still in progress: early-return so that
+			// syncStatusFromPod does not overwrite the transient
+			// Ready=False/InplaceUpdate conditions set during the update.
+			return nil
+		}
 	}
 	// Ensure probe configurations are valid and take effect on the pod.
 	if err := r.probeManager.EnsureProbe(ctx, box, pod, newStatus); err != nil {
@@ -422,15 +425,6 @@ func podIsReady(pod *corev1.Pod) bool {
 	return cond != nil && cond.Status == corev1.ConditionTrue
 }
 
-func setUpdateReady(status *agentsv1alpha1.SandboxStatus, ready bool, reason, msg string) {
-	value := metav1.ConditionFalse
-	if ready {
-		value, reason, msg = metav1.ConditionTrue, agentsv1alpha1.SandboxReadyReasonPodReady, ""
-	}
-	utils.SetSandboxCondition(status, metav1.Condition{Type: string(agentsv1alpha1.SandboxConditionReady),
-		Status: value, Reason: reason, Message: utils.TruncateConditionMessage(msg), LastTransitionTime: metav1.Now()})
-}
-
 func inplaceWaitMessage(pod *corev1.Pod) string {
 	if pod == nil {
 		return "waiting for Pod"
@@ -444,11 +438,6 @@ func inplaceWaitMessage(pod *corev1.Pod) string {
 		}
 	}
 	return "waiting for target configuration and Pod readiness"
-}
-
-func isTerminalInplaceUpdateReason(reason string) bool {
-	return reason == agentsv1alpha1.SandboxInplaceUpdateReasonFailed ||
-		reason == agentsv1alpha1.SandboxInplaceUpdateReasonUnsupportedResize
 }
 
 // isInplaceUpdateTerminal returns true if the InplaceUpdate condition has already
@@ -467,85 +456,139 @@ func isInplaceUpdateTerminal(newStatus *agentsv1alpha1.SandboxStatus) bool {
 	return false
 }
 
+// handleInplaceUpdateSandbox is the SandboxClaim delivery adapter over the shared
+// in-place engine. It keeps the pre-SUO claim contract: a pod is updated in
+// place at most once, a terminal InplaceUpdate condition is never re-evaluated,
+// and done=true hands Ready back to the caller's probe and status sync.
 func (r *commonControl) handleInplaceUpdateSandbox(ctx context.Context, args EnsureFuncArgs) (done bool, err error) {
 	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
-	handler := &CommonInPlaceUpdateHandler{
-		control:  r.inplaceUpdateControl,
-		recorder: r.recorder,
-	}
-	previous := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
-	if previous != nil && isTerminalInplaceUpdateReason(previous.Reason) &&
-		previous.ObservedGeneration == box.Generation && box.Status.UpdateRevision == newStatus.UpdateRevision {
-		// 无副作用的终态预检查拒绝仍可反映 Pod 健康状态；写入失败和记录损坏不放开 Ready。
-		_, validationErr := validateInplaceUpdate(pod, box)
-		ready := validationErr != nil && classifyInplaceError(validationErr) != inplaceClassStateCorrupted && podIsReady(pod)
-		setUpdateReady(newStatus, ready, agentsv1alpha1.SandboxReadyReasonInplaceUpdating, previous.Message)
+	logger := klog.FromContext(ctx)
+	hashMatched := pod.Labels[agentsv1alpha1.PodLabelTemplateHash] == newStatus.UpdateRevision
+
+	// A terminal InplaceUpdate condition (Succeeded, or a failure such as resize
+	// subresource not available, infeasible, deferred) is not re-evaluated once
+	// the pod carries the target revision. When the resize subresource call
+	// fails, the pod spec is never updated, so spec==status (both old values)
+	// would cause the completion check to falsely report completion.
+	if hashMatched && isInplaceUpdateTerminal(newStatus) {
 		return true, nil
 	}
-	result, err := handleInPlaceUpdateCommon(ctx, handler.GetInPlaceUpdateControl(), pod, box, newStatus.UpdateRevision)
-	hasErr := err != nil
-	ready := podIsReady(pod)
-	msg := inplaceWaitMessage(pod)
-	reason := agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating
-	status := metav1.ConditionFalse
 
-	switch {
-	case hasErr:
-		msg = utils.TruncateConditionMessage(err.Error())
-		if isTerminalInplaceError(err) {
-			reason = agentsv1alpha1.SandboxInplaceUpdateReasonFailed
-			if isUnsupportedResizeError(err) {
-				reason = agentsv1alpha1.SandboxInplaceUpdateReasonUnsupportedResize
-			}
-			done = true
+	metadataOnly := !hashMatched && isMetadataOnlyChange(pod, box)
+	result, err := handleInPlaceUpdateCommon(ctx, r.inplaceUpdateControl, pod, box, newStatus.UpdateRevision, claimInplaceEngineOptions)
 
-			// 只有无副作用的预检查拒绝可以沿用 Pod 健康状态。
-			// 已尝试写入或更新记录损坏时，即使缓存中的 Pod 仍 Ready，也关闭门禁。
-			if result == inplaceUpdateStepPatchDelivered || classifyInplaceError(err) == inplaceClassStateCorrupted {
-				ready = false
-			}
-			if previous == nil || previous.Reason != reason || previous.Message != msg || previous.ObservedGeneration != box.Generation {
-				if recorder := handler.GetRecorder(); recorder != nil {
-					recorder.Event(box, corev1.EventTypeWarning, "InplaceUpdateFailed", msg)
-				}
-			}
-			err = nil
-		} else {
-			// 结果未知或可重试时，保留错误交给协调器重试，不暴露缓存中的 Ready=True。
-			ready = false
-		}
-
-	case result == inplaceUpdateStepSucceeded && ready:
-		reason = agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded
-		status = metav1.ConditionTrue
-		msg = ""
-		done = true
-
-	case result == inplaceUpdateStepSucceeded:
-		msg = "configuration applied; waiting for Pod Ready: " + msg
-	}
-	// A memory downscale is silently skipped by the resize path's lenient
-	// comparison while the image upgrade proceeds as usual; emit an advisory
-	// event on the first observed progress for this generation to remind the
-	// user that the target memory was not actually reduced.
-	if !hasErr && (result == inplaceUpdateStepPatchDelivered || result == inplaceUpdateStepSucceeded) &&
-		(previous == nil || previous.ObservedGeneration != box.Generation) {
-		if downscaleErr := inplaceupdate.CheckMemoryDownscale(box, pod); downscaleErr != nil {
-			if recorder := handler.GetRecorder(); recorder != nil {
-				recorder.Event(box, corev1.EventTypeWarning, "MemoryDownscaleSkipped", downscaleErr.Error())
-			}
+	if err != nil {
+		switch classifyInplaceError(err) {
+		case inplaceClassUntrackedPod:
+			// old Pod do not include Labels[pod-template-hash] and do not support inplace update.
+			return true, nil
+		case inplaceClassUnsupportedChange:
+			logger.Info("sandbox hash-immutable-part changed, and does not permit in-place upgrades", "sandbox", klog.KObj(box))
+			r.recorder.Eventf(box, corev1.EventTypeWarning, "InplaceUpdateForbidden",
+				"InplaceUpdate only support image, resources, metadata")
+			return true, nil
+		case inplaceClassRepeatedUpdate:
+			// currently, multiple in-place updates are not supported.
+			logger.Info("currently, multiple in-place updates are not supported", "sandbox", klog.KObj(box))
+			r.recorder.Eventf(box, corev1.EventTypeWarning, "InplaceUpdateForbidden", err.Error())
+			return true, nil
+		case inplaceClassStateCorrupted:
+			return false, err
 		}
 	}
-	// SetSandboxCondition does not refresh ObservedGeneration when it updates an
-	// existing Condition, so sync the pointer directly here to ensure cross-round
-	// Claim consumers and event dedup judge by the current generation.
-	if previous != nil {
-		previous.ObservedGeneration = box.Generation
+	if !hashMatched && result == inplaceUpdateStepInProgress && err == nil {
+		// Waiting for an earlier round to finish; nothing was written this round.
+		logger.Info("currently, multiple in-place updates are not supported", "sandbox", klog.KObj(box))
+		r.recorder.Eventf(box, corev1.EventTypeWarning, "InplaceUpdateForbidden",
+			"currently, multiple in-place updates are not supported")
+		return false, nil
 	}
+
+	if hashMatched {
+		// Observing a round already delivered to the pod.
+		if err != nil {
+			msg := fmt.Sprintf("in-place resource resize failed: %v", err)
+			logger.Info(msg, "sandbox", klog.KObj(box))
+			r.recorder.Eventf(box, corev1.EventTypeWarning, "InplaceUpdateFailed", msg)
+			utils.SetSandboxCondition(newStatus, metav1.Condition{
+				Type: string(agentsv1alpha1.SandboxConditionInplaceUpdate), Status: metav1.ConditionFalse,
+				Reason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed, Message: utils.TruncateConditionMessage(msg), LastTransitionTime: metav1.Now(),
+			})
+			return true, nil
+		}
+		if result != inplaceUpdateStepSucceeded {
+			return false, nil
+		}
+		utils.SetSandboxCondition(newStatus, metav1.Condition{
+			Type: string(agentsv1alpha1.SandboxConditionInplaceUpdate), Status: metav1.ConditionTrue,
+			Reason: agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded, Message: "", LastTransitionTime: metav1.Now(),
+		})
+		return true, nil
+	}
+
+	// Memory downscale is rejected at the claim write path (SetResources) and
+	// at claim admission; here we only surface an advisory event. A hard
+	// failure would misclassify pods whose memory was raised by the
+	// environment (LimitRange minimums, admission webhooks, VPA actuation) as
+	// downscales and permanently block unrelated image/metadata rollouts.
+	if downscaleErr := inplaceupdate.CheckMemoryDownscale(box, pod); downscaleErr != nil {
+		logger.Info("skipping memory downscale", "sandbox", klog.KObj(box), "reason", downscaleErr.Error())
+		r.recorder.Eventf(box, corev1.EventTypeWarning, "MemoryDownscaleSkipped", downscaleErr.Error())
+	}
+
+	// Metadata-only changes are patched directly without going through the
+	// in-place update conditions, so they never block sandbox readiness.
+	if metadataOnly {
+		if err != nil {
+			r.recorder.Eventf(box, corev1.EventTypeWarning, "InplaceUpdateFailed", err.Error())
+			return false, err
+		}
+		return true, nil
+	}
+
+	if classifyInplaceError(err) == inplaceClassQoSRejected {
+		msg := err.Error()
+		logger.Info(msg, "sandbox", klog.KObj(box))
+		r.recorder.Eventf(box, corev1.EventTypeWarning, "InplaceUpdateFailed", msg)
+		utils.SetSandboxCondition(newStatus, metav1.Condition{
+			Type: string(agentsv1alpha1.SandboxConditionInplaceUpdate), Status: metav1.ConditionFalse,
+			Reason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed, Message: utils.TruncateConditionMessage(msg), LastTransitionTime: metav1.Now(),
+		})
+		return true, nil
+	}
+
+	// Start inplace update sandbox: gate Ready until the delivered round is
+	// observed complete.
 	utils.SetSandboxCondition(newStatus, metav1.Condition{
-		Type: string(agentsv1alpha1.SandboxConditionInplaceUpdate), Status: status,
-		Reason: reason, Message: utils.TruncateConditionMessage(msg), ObservedGeneration: box.Generation, LastTransitionTime: metav1.Now(),
+		Type: string(agentsv1alpha1.SandboxConditionInplaceUpdate), Status: metav1.ConditionFalse,
+		Reason: agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating, LastTransitionTime: metav1.Now(),
 	})
-	setUpdateReady(newStatus, ready, agentsv1alpha1.SandboxReadyReasonInplaceUpdating, msg)
-	return done, err
+	utils.SetSandboxCondition(newStatus, metav1.Condition{
+		Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse,
+		Reason: agentsv1alpha1.SandboxReadyReasonInplaceUpdating, Message: "inplace update is incompleted", LastTransitionTime: metav1.Now(),
+	})
+	if err != nil {
+		msg := err.Error()
+		r.recorder.Eventf(box, corev1.EventTypeWarning, "InplaceUpdateFailed", msg)
+		reason := agentsv1alpha1.SandboxInplaceUpdateReasonFailed
+		if isUnsupportedResizeError(err) {
+			reason = agentsv1alpha1.SandboxInplaceUpdateReasonUnsupportedResize
+		}
+		utils.SetSandboxCondition(newStatus, metav1.Condition{
+			Type: string(agentsv1alpha1.SandboxConditionInplaceUpdate), Status: metav1.ConditionFalse,
+			Reason: reason,
+			// K8s API errors can embed full PodSpec diffs that are too verbose for conditions.
+			Message: utils.TruncateConditionMessage(msg), LastTransitionTime: metav1.Now(),
+		})
+		// ResizeNotSupportedError is returned when both the pods/resize subresource
+		// (K8s 1.33+) and the direct spec patch fallback (K8s 1.27-1.32) fail,
+		// which typically means InPlacePodVerticalScaling is not enabled, so it is
+		// terminal.
+		if isUnsupportedResizeError(err) {
+			return true, nil
+		}
+		return false, err
+	}
+	// Nothing needed writing; the pod already matches the target.
+	return result == inplaceUpdateStepSucceeded, nil
 }
