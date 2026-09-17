@@ -171,7 +171,11 @@ func TestHandleInPlaceUpdateCommon(t *testing.T) {
 			expectedResult: true,
 			expectError:    false,
 			checkStatus: func(t *testing.T, status *agentsv1alpha1.SandboxStatus) {
-				require.Empty(t, status.Conditions, "不支持的变更只报告原有 Event")
+				cond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
+				require.NotNil(t, cond)
+				require.Equal(t, metav1.ConditionFalse, cond.Status)
+				require.Equal(t, agentsv1alpha1.SandboxInplaceUpdateReasonFailed, cond.Reason)
+				require.NotEmpty(t, cond.Message)
 			},
 			description: "When hash mismatch occurs, should return true",
 		},
@@ -1848,7 +1852,7 @@ func TestInplaceStepAndClaimState(t *testing.T) {
 		{name: "init image change", kind: "init-image", step: inplaceUpdateStepInProgress, class: inplaceClassUnsupportedChange, hasError: true, terminal: true, claimDone: true, claimReason: agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded},
 		{name: "init resource change", kind: "init-resource", step: inplaceUpdateStepInProgress, class: inplaceClassUnsupportedChange, hasError: true, terminal: true, claimDone: true, claimReason: agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded},
 		{name: "injected init container unchanged", kind: "init-injected", step: inplaceUpdateStepSucceeded, claimDone: true, claimReason: agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded},
-		{name: "unsupported", kind: "unsupported", step: inplaceUpdateStepInProgress, class: inplaceClassUnsupportedChange, hasError: true, terminal: true, claimDone: true},
+		{name: "unsupported", kind: "unsupported", step: inplaceUpdateStepInProgress, class: inplaceClassUnsupportedChange, hasError: true, terminal: true, claimDone: true, claimReason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed},
 		{name: "corrupted matching revision", kind: "corrupted", step: inplaceUpdateStepInProgress, class: inplaceClassStateCorrupted, hasError: true, terminal: true, claimDone: true, claimReason: agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded},
 		{name: "corrupted old revision", kind: "corrupted-old", step: inplaceUpdateStepInProgress, class: inplaceClassStateCorrupted, hasError: true, terminal: true, claimError: true},
 		{name: "C1 QoS rejection", kind: "qos", step: inplaceUpdateStepInProgress, class: inplaceClassQoSRejected, hasError: true, terminal: true, claimDone: true, claimReason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed},
@@ -1988,12 +1992,7 @@ func TestInplaceStepAndClaimState(t *testing.T) {
 						require.NoError(t, err)
 					}
 					ready := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionReady))
-					if tt.kind == "resize" || tt.kind == "image" {
-						require.NotNil(t, ready)
-						require.Equal(t, metav1.ConditionFalse, ready.Status)
-					} else {
-						require.Nil(t, ready)
-					}
+					require.Nil(t, ready)
 					cond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
 					if tt.claimReason == "" {
 						require.Nil(t, cond)
