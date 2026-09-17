@@ -39,7 +39,7 @@ see-also:
 - 写入与生效失败统一 UpdateFailed；QoS 拒绝独立分类，静态校验先于 PreUpgrade。Conflict/限流/临时网络错误重试，拉取退避和 resize Deferred 等待；可确定属于当前目标的不可行 resize 等错误终止。
 - resize 前持久化资源意图，避免 resize 成功、metadata patch 失败后丢失生效检查；资源下调必须等待实际配额收敛。目标 hash 不能替代实际状态。未声明资源键继续保留系统侧值，本轮不增加资源键删除协议。
 - 镜像记录新增 `targetImage`，以实际运行目标确认生效，允许回到原 ImageID；历史记录仍使用原基线判断。
-- Claim 等待端消费 Failed，不能交付健康但配置未更新的旧 Pod；显式 Upgrade 不继承旧 Claim Condition。
+- Claim 等待端仅在 `InplaceUpdate=False/InplaceUpdating` 时等待。QoS 或 immutable-hash 拒绝等未写入镜像或资源的终态 `Failed`，若 Sandbox 保持 `Running` 且旧 Pod 健康，则沿用既有行为并允许交付；显式 Upgrade 不继承旧 Claim Condition。
 
 ### 新 SUO 与有限生命周期
 
@@ -54,6 +54,12 @@ see-also:
 ### 兼容与验证边界
 
 新增 API 字段可选；部署时需更新生成的 CRD。已有正在执行、没有进度记录的升级在首次接纳时建立预算；历史无操作 UID 的直接更新保留原恢复 feature gate。缺少 kubelet 观察 generation 的旧集群不能可靠归属 resize 失败时，保守等调用方预算，不将旧失败直接用于新目标。跨运行时的镜像引用/Pod status 行为需专门集群验证，本轮普通验证不运行 E2E。
+
+#### Claim QoS rejection preserves probe synchronization
+
+This is a compatibility boundary of the existing claim-time path, not a behavior of the SUO `InplaceUpdate` strategy. When a claim-time QoS pre-check rejects a target, the controller reports `InplaceUpdate=False/Failed` and does not issue an in-place image or resource update. It nevertheless continues the pre-existing outer `EnsureProbe` and Pod Ready synchronization flow.
+
+Consequently, if that same template change also updates `spec.probes` or `autoPausePolicy`, the old Pod's probe annotation and probe-related conditions can be synchronized even though its image and resources stay unchanged. This deliberately preserves Claim probe maintenance and AutoPause behavior; it is not an unhandled QoS rejection. A future requirement for a rejected target to make no Pod writes of any kind would need separate design and compatibility evaluation, rather than adding a QoS-specific Probe bypass to this SUO change.
 
 ## Summary
 

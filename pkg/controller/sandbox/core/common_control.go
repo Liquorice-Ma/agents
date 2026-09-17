@@ -434,9 +434,14 @@ func handleClaimInplaceUpdate(ctx context.Context, handler InPlaceUpdateHandler,
 		return true, nil
 	} else if box.Annotations[agentsv1alpha1.SandboxHashImmutablePart] != "" &&
 		box.Annotations[agentsv1alpha1.SandboxHashImmutablePart] != hashImmutablePart {
+		msg := "InplaceUpdate only support image, resources, metadata"
 		klog.FromContext(ctx).Info("sandbox hash-immutable-part changed, and does not permit in-place upgrades", "sandbox", klog.KObj(box),
 			"old hash", box.Annotations[agentsv1alpha1.SandboxHashImmutablePart], "new hash", hashImmutablePart)
-		handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "InplaceUpdateForbidden", "InplaceUpdate only support image, resources, metadata")
+		handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "InplaceUpdateForbidden", msg)
+		utils.SetSandboxCondition(newStatus, metav1.Condition{
+			Type: string(agentsv1alpha1.SandboxConditionInplaceUpdate), Status: metav1.ConditionFalse,
+			Reason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed, Message: msg, LastTransitionTime: metav1.Now(),
+		})
 		return true, nil
 	}
 

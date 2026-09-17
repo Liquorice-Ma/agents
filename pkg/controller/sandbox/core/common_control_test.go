@@ -395,7 +395,7 @@ func TestCommonControl_EnsureSandboxUpdated(t *testing.T) {
 		{name: "claim metadata still maintains probes", claimKind: "metadata"},
 		{name: "claim QoS-changing compatible downscale is rejected", claimKind: "qos-downscale", expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed},
 		{name: "claim untracked pod remains usable", claimKind: "untracked"},
-		{name: "claim unsupported template remains usable", claimKind: "unsupported"},
+		{name: "claim unsupported template remains usable", claimKind: "unsupported", expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed},
 		{name: "claim previous failure remains usable", claimKind: "terminal", expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed},
 		{name: "claim previous success remains usable", claimKind: "terminal", expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded},
 		{name: "claim previous unsupported resize remains usable", claimKind: "terminal", expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonUnsupportedResize},
