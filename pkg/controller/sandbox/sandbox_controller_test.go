@@ -5972,7 +5972,7 @@ func TestReconcile_ErrorPath_UpdatesSandboxStatus(t *testing.T) {
 	cond := utils.GetSandboxCondition(&stored.Status, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
 	require.NotNil(t, cond)
 	require.Equal(t, metav1.ConditionFalse, cond.Status)
-	require.Equal(t, agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating, cond.Reason)
+	require.Equal(t, agentsv1alpha1.SandboxInplaceUpdateReasonFailed, cond.Reason)
 	require.Equal(t, stored.Generation, cond.ObservedGeneration)
 	require.Contains(t, cond.Message, "simulated pod patch failure")
 	ready := utils.GetSandboxCondition(&stored.Status, string(agentsv1alpha1.SandboxConditionReady))

@@ -481,6 +481,18 @@ func handleClaimInplaceUpdate(ctx context.Context, handler InPlaceUpdateHandler,
 		return true, nil
 	}
 
+	origQoS, newQoS, qosChanged := inplaceupdate.CheckResizeQoSChange(box, pod)
+	if qosChanged {
+		msg := fmt.Sprintf("resource resize would change QoS class from %s to %s, resize rejected", origQoS, newQoS)
+		klog.FromContext(ctx).Info(msg, "sandbox", klog.KObj(box))
+		handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "InplaceUpdateFailed", msg)
+		utils.SetSandboxCondition(newStatus, metav1.Condition{
+			Type: string(agentsv1alpha1.SandboxConditionInplaceUpdate), Status: metav1.ConditionFalse,
+			Reason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed, Message: msg, LastTransitionTime: metav1.Now(),
+		})
+		return true, nil
+	}
+
 	if downscaleErr := inplaceupdate.CheckMemoryDownscale(box, pod); downscaleErr != nil {
 		klog.FromContext(ctx).Info("skipping memory downscale", "sandbox", klog.KObj(box), "reason", downscaleErr.Error())
 		handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "MemoryDownscaleSkipped", downscaleErr.Error())
@@ -492,18 +504,6 @@ func handleClaimInplaceUpdate(ctx context.Context, handler InPlaceUpdateHandler,
 			handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "InplaceUpdateFailed", updateErr.Error())
 			return false, updateErr
 		}
-		return true, nil
-	}
-
-	origQoS, newQoS, qosChanged := inplaceupdate.CheckResizeQoSChange(box, pod)
-	if qosChanged {
-		msg := fmt.Sprintf("resource resize would change QoS class from %s to %s, resize rejected", origQoS, newQoS)
-		klog.FromContext(ctx).Info(msg, "sandbox", klog.KObj(box))
-		handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "InplaceUpdateFailed", msg)
-		utils.SetSandboxCondition(newStatus, metav1.Condition{
-			Type: string(agentsv1alpha1.SandboxConditionInplaceUpdate), Status: metav1.ConditionFalse,
-			Reason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed, Message: msg, LastTransitionTime: metav1.Now(),
-		})
 		return true, nil
 	}
 

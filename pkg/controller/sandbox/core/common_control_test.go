@@ -393,6 +393,7 @@ func TestCommonControl_EnsureSandboxUpdated(t *testing.T) {
 			name: "claim no-op still maintains probes", claimKind: "noop", expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded,
 		},
 		{name: "claim metadata still maintains probes", claimKind: "metadata"},
+		{name: "claim QoS-changing compatible downscale is rejected", claimKind: "qos-downscale", expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed},
 		{name: "claim untracked pod remains usable", claimKind: "untracked"},
 		{name: "claim unsupported template remains usable", claimKind: "unsupported"},
 		{name: "claim previous failure remains usable", claimKind: "terminal", expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed},
@@ -558,6 +559,22 @@ func TestCommonControl_EnsureSandboxUpdated(t *testing.T) {
 				case "metadata":
 					pod.Labels[agentsv1alpha1.PodLabelTemplateHash] = "old"
 					box.Spec.Template.Labels = map[string]string{"claim-metadata": "new"}
+				case "qos-downscale":
+					pod.Labels[agentsv1alpha1.PodLabelTemplateHash] = "old"
+					pod.Spec.Containers[0].Resources = corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU:    resource.MustParse("500m"),
+							corev1.ResourceMemory: resource.MustParse("512Mi"),
+						},
+						Limits: corev1.ResourceList{
+							corev1.ResourceCPU:    resource.MustParse("500m"),
+							corev1.ResourceMemory: resource.MustParse("512Mi"),
+						},
+					}
+					box.Spec.Template.Spec.Containers[0].Resources = corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m")},
+						Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
+					}
 				case "untracked":
 					delete(pod.Labels, agentsv1alpha1.PodLabelTemplateHash)
 				case "resize-unsupported", "Infeasible", "Deferred":
@@ -646,6 +663,12 @@ func TestCommonControl_EnsureSandboxUpdated(t *testing.T) {
 				require.Equal(t, types.UID("claim-pod"), storedPod.UID)
 				if tt.claimKind == "metadata" {
 					require.Equal(t, "new", storedPod.Labels["claim-metadata"])
+				}
+				if tt.claimKind == "qos-downscale" {
+					request := storedPod.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]
+					limit := storedPod.Spec.Containers[0].Resources.Limits[corev1.ResourceCPU]
+					require.Equal(t, int64(500), request.MilliValue())
+					require.Equal(t, int64(500), limit.MilliValue())
 				}
 				if tt.claimKind == "old-complete" || tt.claimKind == "old-pending" {
 					require.Equal(t, "old", storedPod.Labels[agentsv1alpha1.PodLabelTemplateHash])
