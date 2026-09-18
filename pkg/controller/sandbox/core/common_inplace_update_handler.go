@@ -89,6 +89,16 @@ func classifyInplaceError(err error) inplaceErrorClass {
 	return inplaceClassUpdateFailed
 }
 
+// inplaceUnderlyingError removes the engine's classification wrapper when a
+// legacy adapter must preserve the underlying error text in a Condition.
+func inplaceUnderlyingError(err error) error {
+	var ie *inplaceUpdateError
+	if errors.As(err, &ie) && ie.Cause != nil {
+		return ie.Cause
+	}
+	return err
+}
+
 // Claim 与 SUO 原地 adapter 使用此分类映射终态；重建保留原有错误处理。
 func isTerminalInplaceError(err error) bool {
 	if classifyInplaceError(err) != inplaceClassUpdateFailed {
@@ -265,9 +275,10 @@ func describeInplaceWaitReason(pod *corev1.Pod) string {
 	return strings.Join(parts, "; ")
 }
 
-// isMetadataOnlyChange 判断 Pod 与 Sandbox 模板之间是否只有 metadata 差异。
-// 模板声明的资源键必须精确匹配，忽略 Pod 中额外注入的资源键。
-// 使用精确比较而非 >=，避免将资源降配误判为无需原地更新的 metadata 快速路径。
+// isMetadataOnlyChange returns true if the only difference between the pod and
+// sandbox template is metadata. Template-declared resources are compared as a
+// subset so admission-injected extras do not turn metadata-only changes into
+// an in-place update.
 func isMetadataOnlyChange(pod *corev1.Pod, box *agentsv1alpha1.Sandbox) bool {
 	if box.Spec.Template == nil {
 		return false
@@ -286,7 +297,7 @@ func isMetadataOnlyChange(pod *corev1.Pod, box *agentsv1alpha1.Sandbox) bool {
 		if origin.Image != container.Image {
 			return false
 		}
-		if !inplaceupdate.ResourcesExactlyEqual(origin.Resources, container.Resources) {
+		if !inplaceupdate.IsResourceSatisfied(origin.Resources, container.Resources) {
 			return false
 		}
 	}

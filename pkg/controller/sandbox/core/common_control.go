@@ -483,14 +483,9 @@ func (r *commonControl) handleInplaceUpdateSandbox(ctx context.Context, args Ens
 			// old Pod do not include Labels[pod-template-hash] and do not support inplace update.
 			return true, nil
 		case inplaceClassUnsupportedChange:
-			msg := err.Error()
 			logger.Info("sandbox hash-immutable-part changed, and does not permit in-place upgrades", "sandbox", klog.KObj(box))
 			r.recorder.Eventf(box, corev1.EventTypeWarning, "InplaceUpdateForbidden",
 				"InplaceUpdate only support image, resources, metadata")
-			utils.SetSandboxCondition(newStatus, metav1.Condition{
-				Type: string(agentsv1alpha1.SandboxConditionInplaceUpdate), Status: metav1.ConditionFalse,
-				Reason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed, Message: utils.TruncateConditionMessage(msg), LastTransitionTime: metav1.Now(),
-			})
 			return true, nil
 		case inplaceClassRepeatedUpdate:
 			// currently, multiple in-place updates are not supported.
@@ -512,7 +507,7 @@ func (r *commonControl) handleInplaceUpdateSandbox(ctx context.Context, args Ens
 	if hashMatched {
 		// Observing a round already delivered to the pod.
 		if err != nil {
-			msg := fmt.Sprintf("in-place resource resize failed: %v", err)
+			msg := fmt.Sprintf("in-place resource resize failed: %v", inplaceUnderlyingError(err))
 			logger.Info(msg, "sandbox", klog.KObj(box))
 			r.recorder.Eventf(box, corev1.EventTypeWarning, "InplaceUpdateFailed", msg)
 			utils.SetSandboxCondition(newStatus, metav1.Condition{
@@ -545,7 +540,7 @@ func (r *commonControl) handleInplaceUpdateSandbox(ctx context.Context, args Ens
 	// in-place update conditions, so they never block sandbox readiness.
 	if metadataOnly {
 		if err != nil {
-			r.recorder.Eventf(box, corev1.EventTypeWarning, "InplaceUpdateFailed", err.Error())
+			r.recorder.Eventf(box, corev1.EventTypeWarning, "InplaceUpdateFailed", inplaceUnderlyingError(err).Error())
 			return false, err
 		}
 		return true, nil
@@ -562,19 +557,19 @@ func (r *commonControl) handleInplaceUpdateSandbox(ctx context.Context, args Ens
 		return true, nil
 	}
 
-	// A delivered update may leave the old container serving while kubelet pulls
-	// the target image. Keep Ready derived from the existing Pod state; the
-	// separate InplaceUpdate condition reports that the target is not effective.
+	// Preserve the legacy Claim contract: any non-metadata in-place update
+	// gates Ready until its completion observation, even when the old container
+	// still serves during an image pull.
 	utils.SetSandboxCondition(newStatus, metav1.Condition{
 		Type: string(agentsv1alpha1.SandboxConditionInplaceUpdate), Status: metav1.ConditionFalse,
 		Reason: agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating, LastTransitionTime: metav1.Now(),
 	})
+	utils.SetSandboxCondition(newStatus, metav1.Condition{
+		Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse,
+		Reason: agentsv1alpha1.SandboxReadyReasonInplaceUpdating, Message: "inplace update is incompleted", LastTransitionTime: metav1.Now(),
+	})
 	if err != nil {
-		msg := err.Error()
-		utils.SetSandboxCondition(newStatus, metav1.Condition{
-			Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse,
-			Reason: agentsv1alpha1.SandboxReadyReasonInplaceUpdating, Message: "inplace update is incompleted", LastTransitionTime: metav1.Now(),
-		})
+		msg := inplaceUnderlyingError(err).Error()
 		r.recorder.Eventf(box, corev1.EventTypeWarning, "InplaceUpdateFailed", msg)
 		reason := agentsv1alpha1.SandboxInplaceUpdateReasonFailed
 		if isUnsupportedResizeError(err) {

@@ -39,12 +39,14 @@ import (
 // upgrade path (covered by inplaceupdate_upgrade_test.go), the claim path
 // never enters the Upgrading phase.
 //
-// Failure semantics differ from the upgrade path:
-//   - Terminal failure (hash-immutable, QoS change): the sandbox stays Running
-//     and Ready=True (the change is "delivered" with an InplaceUpdate=Failed
-//     condition so the claim can still be served).
-//   - Transient failure (bad image): the sandbox stays Running but Ready=False
-//     (not delivered) with InplaceUpdate=InplaceUpdating.
+// Legacy Claim condition semantics:
+//   - A metadata-only change under resource-coverage comparison, or a
+//     hash-immutable rejection, does not write an InplaceUpdate condition; the
+//     existing Pod remains delivered.
+//   - A non-metadata QoS rejection writes InplaceUpdate=False/Failed while the
+//     old Pod remains delivered.
+//   - A delivered update awaiting observation, including a bad image, keeps
+//     Ready=False and InplaceUpdate=False/InplaceUpdating.
 var _ = Describe("InplaceUpdate Claim Path (SandboxClaim delivery)", func() {
 	var (
 		ctx          = context.Background()
@@ -329,11 +331,11 @@ var _ = Describe("InplaceUpdate Claim Path (SandboxClaim delivery)", func() {
 	})
 
 	// =========================================================================
-	// Terminal failure scenarios (deliver Running + InplaceUpdate=Failed)
+	// Legacy direct-delivery and rejection scenarios
 	// =========================================================================
 
-	Context("Terminal failure (deliver Running)", func() {
-		It("should fail and deliver Running when resource resize changes QoS", func() {
+	Context("Legacy direct-delivery conditions", func() {
+		It("should keep a covered resource downscale metadata-only", func() {
 			sbx := newClaimSandbox(fmt.Sprintf("claim-qos-fail-%d", time.Now().UnixNano()))
 			// Start Guaranteed: every container (including the sidecar init
 			// container) must have request==limit for both CPU and memory.
@@ -368,22 +370,24 @@ var _ = Describe("InplaceUpdate Claim Path (SandboxClaim delivery)", func() {
 				}
 			})
 
-			By("Verifying InplaceUpdate condition is Failed with non-empty message")
-			waitInplaceUpdateFailed(sbx, 3*time.Minute)
+			By("Verifying resource coverage keeps the change metadata-only")
+			Consistently(func() *metav1.Condition {
+				return getInplaceUpdateCondition(sbx)
+			}, 10*time.Second, time.Second).Should(BeNil())
 
-			By("Verifying sandbox stays Running (delivered despite failure)")
+			By("Verifying sandbox stays Running")
 			Eventually(func() agentsv1alpha1.SandboxPhase {
 				_ = k8sClient.Get(ctx, types.NamespacedName{Name: sbx.Name, Namespace: sbx.Namespace}, sbx)
 				return sbx.Status.Phase
 			}, 30*time.Second, time.Second).Should(Equal(agentsv1alpha1.SandboxRunning))
 
-			By("Verifying pod QoS remains Guaranteed (resize rejected)")
+			By("Verifying pod QoS remains Guaranteed")
 			pod := &corev1.Pod{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbx.Name, Namespace: sbx.Namespace}, pod)).To(Succeed())
 			Expect(pod.Status.QOSClass).To(Equal(corev1.PodQOSGuaranteed))
 		})
 
-		It("should fail and deliver Running when hash-immutable part changes", func() {
+		It("should keep no InplaceUpdate condition when hash-immutable part changes", func() {
 			sbx := newClaimSandbox(fmt.Sprintf("claim-cmd-fail-%d", time.Now().UnixNano()))
 			Expect(k8sClient.Create(ctx, sbx)).To(Succeed())
 			waitSandboxRunning(sbx)
@@ -393,10 +397,12 @@ var _ = Describe("InplaceUpdate Claim Path (SandboxClaim delivery)", func() {
 				spec.Spec.Containers[0].Command = []string{"/bin/bash", "-c", "sleep 3600"}
 			})
 
-			By("Verifying InplaceUpdate condition is Failed with non-empty message")
-			waitInplaceUpdateFailed(sbx, 3*time.Minute)
+			By("Verifying unsupported changes do not write an InplaceUpdate condition")
+			Consistently(func() *metav1.Condition {
+				return getInplaceUpdateCondition(sbx)
+			}, 10*time.Second, time.Second).Should(BeNil())
 
-			By("Verifying sandbox stays Running (delivered despite failure)")
+			By("Verifying sandbox stays Running (delivered despite rejection)")
 			Eventually(func() agentsv1alpha1.SandboxPhase {
 				_ = k8sClient.Get(ctx, types.NamespacedName{Name: sbx.Name, Namespace: sbx.Namespace}, sbx)
 				return sbx.Status.Phase
@@ -447,16 +453,11 @@ var _ = Describe("InplaceUpdate Claim Path (SandboxClaim delivery)", func() {
 			cond := getInplaceUpdateCondition(sbx)
 			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 
-			By("Verifying Ready condition stays True (old container keeps serving)")
-			// When a bad image cannot be pulled, kubelet keeps the old container
-			// running and the Pod stays healthy; per delivery semantics (write
-			// succeeded but not yet effective, Pod healthy) Ready stays True, and
-			// the target not taking effect is expressed separately via
-			// InplaceUpdate=False/InplaceUpdating.
+			By("Verifying Ready condition stays False while the update is pending")
 			readyCond := getReadyCondition(sbx)
 			Expect(readyCond).NotTo(BeNil())
-			Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
-			Expect(readyCond.Reason).To(Equal(agentsv1alpha1.SandboxReadyReasonPodReady))
+			Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(readyCond.Reason).To(Equal(agentsv1alpha1.SandboxReadyReasonInplaceUpdating))
 		})
 	})
 
@@ -525,8 +526,10 @@ var _ = Describe("InplaceUpdate Claim Path (SandboxClaim delivery)", func() {
 				spec.Spec.Containers[0].Command = []string{"/bin/bash", "-c", "sleep 3600"}
 			})
 
-			By("Verifying InplaceUpdate condition is Failed (hash check rejected the whole change)")
-			waitInplaceUpdateFailed(sbx, 3*time.Minute)
+			By("Verifying hash rejection does not write an InplaceUpdate condition")
+			Consistently(func() *metav1.Condition {
+				return getInplaceUpdateCondition(sbx)
+			}, 10*time.Second, time.Second).Should(BeNil())
 
 			By("Verifying pod image was NOT patched (no partial delivery)")
 			pod := &corev1.Pod{}
