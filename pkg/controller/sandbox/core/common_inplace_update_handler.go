@@ -145,6 +145,10 @@ type inplaceEngineOptions struct {
 	// record waits for that round to finish and never receives a second one.
 	// When false, a new target may supersede an unfinished round.
 	RejectRepeatedUpdate bool
+	// ExactResourceMatch prevents a target resource change from taking the
+	// metadata-only fast path. SUO must validate the requested target, whereas
+	// Claim preserves its legacy resource-coverage comparison.
+	ExactResourceMatch bool
 }
 
 var (
@@ -155,7 +159,8 @@ var (
 	}
 	// upgradeInplaceEngineOptions lets a new SUO correct an unfinished target.
 	upgradeInplaceEngineOptions = inplaceEngineOptions{
-		QoSMode: inplaceupdate.TargetConvergenceMode,
+		QoSMode:            inplaceupdate.TargetConvergenceMode,
+		ExactResourceMatch: true,
 	}
 )
 
@@ -216,7 +221,7 @@ func handleInPlaceUpdateCommon(ctx context.Context, control *inplaceupdate.InPla
 		}
 	}
 
-	metadataOnly := isMetadataOnlyChange(pod, box)
+	metadataOnly := isMetadataOnlyChangeForEngine(pod, box, engineOpts.ExactResourceMatch)
 	if !metadataOnly {
 		if orig, target, changed := engineOpts.QoSMode.CheckResizeQoSChange(box, pod); changed {
 			return inplaceUpdateStepInProgress, newInplaceError(inplaceClassQoSRejected,
@@ -276,10 +281,15 @@ func describeInplaceWaitReason(pod *corev1.Pod) string {
 }
 
 // isMetadataOnlyChange returns true if the only difference between the pod and
-// sandbox template is metadata. Template-declared resources are compared as a
-// subset so admission-injected extras do not turn metadata-only changes into
-// an in-place update.
+// sandbox template is metadata under the Claim resource-coverage contract.
 func isMetadataOnlyChange(pod *corev1.Pod, box *agentsv1alpha1.Sandbox) bool {
+	return isMetadataOnlyChangeForEngine(pod, box, false)
+}
+
+// isMetadataOnlyChangeForEngine applies the resource comparison selected by
+// the caller. Claim accepts resources that cover the requested template, while
+// SUO must compare the exact target so QoS validation cannot be bypassed.
+func isMetadataOnlyChangeForEngine(pod *corev1.Pod, box *agentsv1alpha1.Sandbox, exactResourceMatch bool) bool {
 	if box.Spec.Template == nil {
 		return false
 	}
@@ -297,7 +307,11 @@ func isMetadataOnlyChange(pod *corev1.Pod, box *agentsv1alpha1.Sandbox) bool {
 		if origin.Image != container.Image {
 			return false
 		}
-		if !inplaceupdate.IsResourceSatisfied(origin.Resources, container.Resources) {
+		if exactResourceMatch {
+			if !inplaceupdate.ResourcesExactlyEqual(origin.Resources, container.Resources) {
+				return false
+			}
+		} else if !inplaceupdate.IsResourceSatisfied(origin.Resources, container.Resources) {
 			return false
 		}
 	}

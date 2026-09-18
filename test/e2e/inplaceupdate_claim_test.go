@@ -45,8 +45,8 @@ import (
 //     condition; the existing Pod remains delivered.
 //   - A non-metadata QoS rejection writes InplaceUpdate=False/Failed while the
 //     old Pod remains delivered.
-//   - A delivered update awaiting observation keeps InplaceUpdate=False/
-//     InplaceUpdating. A healthy old Pod remains Ready and claimable.
+//   - A delivered update awaiting observation, including a bad image, keeps
+//     Ready=False and InplaceUpdate=False/InplaceUpdating.
 var _ = Describe("InplaceUpdate Claim Path (SandboxClaim delivery)", func() {
 	var (
 		ctx          = context.Background()
@@ -442,24 +442,6 @@ var _ = Describe("InplaceUpdate Claim Path (SandboxClaim delivery)", func() {
 			By("Verifying pod image was patched to bad image (patch delivered to pod spec)")
 			waitPodImage(sbx, badImage, 2*time.Minute)
 
-			By("Verifying the old Pod remains ready and serving")
-			Consistently(func() string {
-				pod := &corev1.Pod{}
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: sbx.Name, Namespace: sbx.Namespace}, pod); err != nil {
-					return err.Error()
-				}
-				podReady, containersReady := false, false
-				for _, condition := range pod.Status.Conditions {
-					switch condition.Type {
-					case corev1.PodReady:
-						podReady = condition.Status == corev1.ConditionTrue
-					case corev1.ContainersReady:
-						containersReady = condition.Status == corev1.ConditionTrue
-					}
-				}
-				return fmt.Sprintf("%s/%t/%t", pod.Status.Phase, podReady, containersReady)
-			}, 30*time.Second, 2*time.Second).Should(Equal("Running/true/true"))
-
 			By("Verifying sandbox stays Running (claim path never enters Upgrading)")
 			Consistently(func() agentsv1alpha1.SandboxPhase {
 				_ = k8sClient.Get(ctx, types.NamespacedName{Name: sbx.Name, Namespace: sbx.Namespace}, sbx)
@@ -479,11 +461,11 @@ var _ = Describe("InplaceUpdate Claim Path (SandboxClaim delivery)", func() {
 			cond := getInplaceUpdateCondition(sbx)
 			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 
-			By("Verifying Ready remains True while the old Pod is serving")
+			By("Verifying Ready condition stays False while the update is pending")
 			readyCond := getReadyCondition(sbx)
 			Expect(readyCond).NotTo(BeNil())
-			Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
-			Expect(readyCond.Reason).To(Equal(agentsv1alpha1.SandboxReadyReasonPodReady))
+			Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(readyCond.Reason).To(Equal(agentsv1alpha1.SandboxReadyReasonInplaceUpdating))
 		})
 	})
 

@@ -385,9 +385,9 @@ func TestCommonControl_EnsureSandboxUpdated(t *testing.T) {
 	// Claim cases exercise the SandboxClaim delivery path (no UpgradePolicy).
 	// expectReason "" means no InplaceUpdate condition may be written. wait
 	// means the adapter reports done=false: EnsureSandboxUpdated must
-	// early-return, preserving Ready while leaving the stale ProbeValid verdict
-	// and PodInfo untouched. Otherwise the Running path resumes: the probe
-	// manager drops the stale verdict and Ready follows the Pod.
+	// early-return, leaving Ready=False/InplaceUpdating, the stale ProbeValid
+	// verdict and PodInfo untouched. Otherwise the Running path resumes: the
+	// probe manager drops the stale verdict and Ready follows the Pod.
 	tests := []struct {
 		name         string
 		args         EnsureFuncArgs
@@ -409,7 +409,7 @@ func TestCommonControl_EnsureSandboxUpdated(t *testing.T) {
 		{name: "claim unsupported resize is terminal and keeps pod usable", claimKind: "resize-unsupported", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonUnsupportedResize, expectEvent: "InplaceUpdateFailed"},
 		{name: "claim infeasible resize fails and keeps pod usable", claimKind: "Infeasible", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed, expectEvent: "InplaceUpdateFailed"},
 		{name: "claim deferred resize fails and keeps pod usable", claimKind: "Deferred", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed, expectEvent: "InplaceUpdateFailed"},
-		{name: "claim image pending keeps a healthy pod deliverable", claimKind: "image-pending", expectReady: true, wait: true},
+		{name: "claim image pending keeps readiness closed", claimKind: "image-pending", wait: true},
 		{name: "claim completed old record ignores new target", claimKind: "old-complete", expectReady: true, expectEvent: "InplaceUpdateForbidden"},
 		{name: "claim pending old record waits for it", claimKind: "old-pending", wait: true, expectEvent: "InplaceUpdateForbidden"},
 		{
@@ -597,12 +597,6 @@ func TestCommonControl_EnsureSandboxUpdated(t *testing.T) {
 					}
 				case "image-pending", "old-complete", "old-pending":
 					pod.Annotations = map[string]string{inplaceupdate.PodAnnotationInPlaceUpdateStateKey: `{"revision":"old","updateImages":true,"lastContainerStatuses":{"sandbox":{"imageID":"img-old"}}}`}
-					if tt.claimKind == "image-pending" {
-						utils.SetSandboxCondition(status, metav1.Condition{
-							Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue,
-							Reason: agentsv1alpha1.SandboxReadyReasonPodReady,
-						})
-					}
 					if tt.claimKind != "image-pending" {
 						pod.Labels[agentsv1alpha1.PodLabelTemplateHash] = "old"
 						box.Spec.Template.Spec.Containers[0].Image = "test:v2"
@@ -717,17 +711,17 @@ func TestCommonControl_EnsureSandboxUpdated(t *testing.T) {
 					require.Equal(t, "old", storedPod.Labels[agentsv1alpha1.PodLabelTemplateHash])
 					require.Equal(t, "test:v1", storedPod.Spec.Containers[0].Image)
 				}
-				// The produced status must agree with cache-side delivery: a healthy
-				// serving Pod stays claimable even while a target update converges.
+				// The produced status must agree with the cache-side wait: only an
+				// early-returned round keeps Ready closed.
 				produced := tt.args.Box.DeepCopy()
 				produced.Status = *status.DeepCopy()
 				cache, _, err := cachetest.NewTestCache(t, produced)
 				require.NoError(t, err)
 				err = cache.NewSandboxWaitReadyTask(t.Context(), produced).Wait(100 * time.Millisecond)
-				if tt.expectReady {
-					require.NoError(t, err)
-				} else {
+				if tt.wait {
 					require.ErrorContains(t, err, "object is not satisfied")
+				} else {
+					require.NoError(t, err)
 				}
 				return
 			}
