@@ -188,9 +188,9 @@ func (r *commonControl) EnsureSandboxUpdated(ctx context.Context, args EnsureFun
 			return err
 		}
 		if !done {
-			// In-place update still in progress: early-return so that
-			// syncStatusFromPod does not overwrite the transient
-			// Ready=False/InplaceUpdate conditions set during the update.
+			// In-place update is still converging. Keep the prior Ready condition:
+			// it reflects whether the currently serving Pod is deliverable, while
+			// InplaceUpdate independently reports target convergence.
 			return nil
 		}
 	}
@@ -557,16 +557,12 @@ func (r *commonControl) handleInplaceUpdateSandbox(ctx context.Context, args Ens
 		return true, nil
 	}
 
-	// Preserve the legacy Claim contract: any non-metadata in-place update
-	// gates Ready until its completion observation, even when the old container
-	// still serves during an image pull.
+	// A successful patch only means the new target is still converging. Keep
+	// Ready tied to the currently serving Pod so a healthy old container remains
+	// available to SandboxClaim while InplaceUpdate reports that convergence.
 	utils.SetSandboxCondition(newStatus, metav1.Condition{
 		Type: string(agentsv1alpha1.SandboxConditionInplaceUpdate), Status: metav1.ConditionFalse,
 		Reason: agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating, LastTransitionTime: metav1.Now(),
-	})
-	utils.SetSandboxCondition(newStatus, metav1.Condition{
-		Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse,
-		Reason: agentsv1alpha1.SandboxReadyReasonInplaceUpdating, Message: "inplace update is incompleted", LastTransitionTime: metav1.Now(),
 	})
 	if err != nil {
 		msg := inplaceUnderlyingError(err).Error()

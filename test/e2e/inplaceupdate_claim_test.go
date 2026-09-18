@@ -41,12 +41,12 @@ import (
 //
 // Legacy Claim condition semantics:
 //   - A metadata-only change under resource-coverage comparison, or a
-//     hash-immutable rejection, does not write an InplaceUpdate condition; the
-//     existing Pod remains delivered.
+//     hash-immutable rejection, does not change the existing InplaceUpdate
+//     condition; the existing Pod remains delivered.
 //   - A non-metadata QoS rejection writes InplaceUpdate=False/Failed while the
 //     old Pod remains delivered.
-//   - A delivered update awaiting observation, including a bad image, keeps
-//     Ready=False and InplaceUpdate=False/InplaceUpdating.
+//   - A delivered update awaiting observation keeps InplaceUpdate=False/
+//     InplaceUpdating. A healthy old Pod remains Ready and claimable.
 var _ = Describe("InplaceUpdate Claim Path (SandboxClaim delivery)", func() {
 	var (
 		ctx          = context.Background()
@@ -335,7 +335,7 @@ var _ = Describe("InplaceUpdate Claim Path (SandboxClaim delivery)", func() {
 	// =========================================================================
 
 	Context("Legacy direct-delivery conditions", func() {
-		It("should keep a covered resource downscale metadata-only", func() {
+		It("should preserve InplaceUpdate success for a covered resource downscale", func() {
 			sbx := newClaimSandbox(fmt.Sprintf("claim-qos-fail-%d", time.Now().UnixNano()))
 			// Start Guaranteed: every container (including the sidecar init
 			// container) must have request==limit for both CPU and memory.
@@ -370,10 +370,14 @@ var _ = Describe("InplaceUpdate Claim Path (SandboxClaim delivery)", func() {
 				}
 			})
 
-			By("Verifying resource coverage keeps the change metadata-only")
-			Consistently(func() *metav1.Condition {
-				return getInplaceUpdateCondition(sbx)
-			}, 10*time.Second, time.Second).Should(BeNil())
+			By("Verifying resource coverage keeps the prior InplaceUpdate success")
+			Consistently(func() string {
+				cond := getInplaceUpdateCondition(sbx)
+				if cond == nil {
+					return ""
+				}
+				return string(cond.Status) + "/" + cond.Reason
+			}, 10*time.Second, time.Second).Should(Equal(string(metav1.ConditionTrue) + "/" + agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded))
 
 			By("Verifying sandbox stays Running")
 			Eventually(func() agentsv1alpha1.SandboxPhase {
@@ -387,7 +391,7 @@ var _ = Describe("InplaceUpdate Claim Path (SandboxClaim delivery)", func() {
 			Expect(pod.Status.QOSClass).To(Equal(corev1.PodQOSGuaranteed))
 		})
 
-		It("should keep no InplaceUpdate condition when hash-immutable part changes", func() {
+		It("should preserve InplaceUpdate success when hash-immutable part changes", func() {
 			sbx := newClaimSandbox(fmt.Sprintf("claim-cmd-fail-%d", time.Now().UnixNano()))
 			Expect(k8sClient.Create(ctx, sbx)).To(Succeed())
 			waitSandboxRunning(sbx)
@@ -397,10 +401,14 @@ var _ = Describe("InplaceUpdate Claim Path (SandboxClaim delivery)", func() {
 				spec.Spec.Containers[0].Command = []string{"/bin/bash", "-c", "sleep 3600"}
 			})
 
-			By("Verifying unsupported changes do not write an InplaceUpdate condition")
-			Consistently(func() *metav1.Condition {
-				return getInplaceUpdateCondition(sbx)
-			}, 10*time.Second, time.Second).Should(BeNil())
+			By("Verifying unsupported changes preserve the prior InplaceUpdate success")
+			Consistently(func() string {
+				cond := getInplaceUpdateCondition(sbx)
+				if cond == nil {
+					return ""
+				}
+				return string(cond.Status) + "/" + cond.Reason
+			}, 10*time.Second, time.Second).Should(Equal(string(metav1.ConditionTrue) + "/" + agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded))
 
 			By("Verifying sandbox stays Running (delivered despite rejection)")
 			Eventually(func() agentsv1alpha1.SandboxPhase {
@@ -434,6 +442,24 @@ var _ = Describe("InplaceUpdate Claim Path (SandboxClaim delivery)", func() {
 			By("Verifying pod image was patched to bad image (patch delivered to pod spec)")
 			waitPodImage(sbx, badImage, 2*time.Minute)
 
+			By("Verifying the old Pod remains ready and serving")
+			Consistently(func() string {
+				pod := &corev1.Pod{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: sbx.Name, Namespace: sbx.Namespace}, pod); err != nil {
+					return err.Error()
+				}
+				podReady, containersReady := false, false
+				for _, condition := range pod.Status.Conditions {
+					switch condition.Type {
+					case corev1.PodReady:
+						podReady = condition.Status == corev1.ConditionTrue
+					case corev1.ContainersReady:
+						containersReady = condition.Status == corev1.ConditionTrue
+					}
+				}
+				return fmt.Sprintf("%s/%t/%t", pod.Status.Phase, podReady, containersReady)
+			}, 30*time.Second, 2*time.Second).Should(Equal("Running/true/true"))
+
 			By("Verifying sandbox stays Running (claim path never enters Upgrading)")
 			Consistently(func() agentsv1alpha1.SandboxPhase {
 				_ = k8sClient.Get(ctx, types.NamespacedName{Name: sbx.Name, Namespace: sbx.Namespace}, sbx)
@@ -453,11 +479,11 @@ var _ = Describe("InplaceUpdate Claim Path (SandboxClaim delivery)", func() {
 			cond := getInplaceUpdateCondition(sbx)
 			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 
-			By("Verifying Ready condition stays False while the update is pending")
+			By("Verifying Ready remains True while the old Pod is serving")
 			readyCond := getReadyCondition(sbx)
 			Expect(readyCond).NotTo(BeNil())
-			Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
-			Expect(readyCond.Reason).To(Equal(agentsv1alpha1.SandboxReadyReasonInplaceUpdating))
+			Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(readyCond.Reason).To(Equal(agentsv1alpha1.SandboxReadyReasonPodReady))
 		})
 	})
 
@@ -526,10 +552,14 @@ var _ = Describe("InplaceUpdate Claim Path (SandboxClaim delivery)", func() {
 				spec.Spec.Containers[0].Command = []string{"/bin/bash", "-c", "sleep 3600"}
 			})
 
-			By("Verifying hash rejection does not write an InplaceUpdate condition")
-			Consistently(func() *metav1.Condition {
-				return getInplaceUpdateCondition(sbx)
-			}, 10*time.Second, time.Second).Should(BeNil())
+			By("Verifying hash rejection preserves the prior InplaceUpdate success")
+			Consistently(func() string {
+				cond := getInplaceUpdateCondition(sbx)
+				if cond == nil {
+					return ""
+				}
+				return string(cond.Status) + "/" + cond.Reason
+			}, 10*time.Second, time.Second).Should(Equal(string(metav1.ConditionTrue) + "/" + agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded))
 
 			By("Verifying pod image was NOT patched (no partial delivery)")
 			pod := &corev1.Pod{}

@@ -5895,6 +5895,11 @@ func TestReconcile_ErrorPath_UpdatesSandboxStatus(t *testing.T) {
 		},
 		Status: agentsv1alpha1.SandboxStatus{
 			Phase: agentsv1alpha1.SandboxRunning,
+			Conditions: []metav1.Condition{{
+				Type:   string(agentsv1alpha1.SandboxConditionReady),
+				Status: metav1.ConditionTrue,
+				Reason: agentsv1alpha1.SandboxReadyReasonPodReady,
+			}},
 		},
 	}
 
@@ -5916,6 +5921,10 @@ func TestReconcile_ErrorPath_UpdatesSandboxStatus(t *testing.T) {
 		},
 		Status: corev1.PodStatus{
 			Phase: corev1.PodRunning,
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+				{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
+			},
 		},
 	}
 
@@ -5966,8 +5975,8 @@ func TestReconcile_ErrorPath_UpdatesSandboxStatus(t *testing.T) {
 		t.Error("Expected at least one Pod patch attempt")
 	}
 	// The error branch must persist the update state, not just return the
-	// error: the claim adapter records the write failure on the InplaceUpdate
-	// condition and keeps Ready closed until the retried write succeeds.
+	// error. A failed write does not make an already healthy serving Pod
+	// unavailable to SandboxClaim.
 	stored := &agentsv1alpha1.Sandbox{}
 	require.NoError(t, fakeClient.Get(t.Context(), req.NamespacedName, stored))
 	cond := utils.GetSandboxCondition(&stored.Status, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
@@ -5977,8 +5986,8 @@ func TestReconcile_ErrorPath_UpdatesSandboxStatus(t *testing.T) {
 	require.Contains(t, cond.Message, "simulated pod patch failure")
 	ready := utils.GetSandboxCondition(&stored.Status, string(agentsv1alpha1.SandboxConditionReady))
 	require.NotNil(t, ready)
-	require.Equal(t, metav1.ConditionFalse, ready.Status)
-	require.Equal(t, agentsv1alpha1.SandboxReadyReasonInplaceUpdating, ready.Reason)
+	require.Equal(t, metav1.ConditionTrue, ready.Status)
+	require.Equal(t, agentsv1alpha1.SandboxReadyReasonPodReady, ready.Reason)
 	require.Equal(t, agentsv1alpha1.SandboxRunning, stored.Status.Phase)
 }
 
