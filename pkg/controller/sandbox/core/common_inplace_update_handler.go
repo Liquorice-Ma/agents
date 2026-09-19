@@ -39,9 +39,6 @@ const (
 	inplaceClassUnsupportedChange
 	inplaceClassQoSRejected
 	inplaceClassStateCorrupted
-	// The pod already completed an earlier round and the caller's policy forbids
-	// a second one; the new target was ignored and nothing was written.
-	inplaceClassRepeatedUpdate
 )
 
 // inplaceUpdateError is the single error type the engine returns for
@@ -106,9 +103,8 @@ func isTerminalInplaceError(err error) bool {
 	}
 	var resizeErr *inplaceupdate.ResizeNotSupportedError
 	var applyErr *inplaceupdate.ResizeInfeasibleError
-	var imageErr *inplaceupdate.ImagePullFailedError
 	return errors.As(err, &resizeErr) || errors.As(err, &applyErr) ||
-		errors.As(err, &imageErr) || apierrors.IsForbidden(err) ||
+		apierrors.IsForbidden(err) ||
 		apierrors.IsUnauthorized(err) || apierrors.IsInvalid(err) ||
 		apierrors.IsBadRequest(err) || apierrors.IsMethodNotSupported(err)
 }
@@ -123,8 +119,8 @@ func isUnsupportedResizeError(err error) bool {
 type inplaceUpdateStepResult int
 
 const (
-	// Pre-check failed, or the caller's policy is still waiting for an earlier
-	// round to finish; this write has not been issued yet.
+	// Pre-check failed or the current update is not yet complete; this write has
+	// not been issued yet.
 	inplaceUpdateStepInProgress inplaceUpdateStepResult = iota
 	// A write has been attempted or is waiting to take effect, including write
 	// failures and partially successful writes.
@@ -132,42 +128,8 @@ const (
 	inplaceUpdateStepSucceeded
 )
 
-// inplaceEngineOptions carries the per-path policy choices the shared engine
-// must not decide on its own. Each adapter passes its own fixed value so a
-// change in one path can never silently alter the other.
-type inplaceEngineOptions struct {
-	// QoSMode selects the resize QoS pre-check algorithm. It must match the mode
-	// the underlying control writes with, otherwise validation and execution
-	// disagree on which requests are accepted.
-	QoSMode inplaceupdate.UpdateMode
-	// RejectRepeatedUpdate keeps the legacy claim rule ("multiple in-place
-	// updates are not supported"): a pod that already carries an in-place update
-	// record waits for that round to finish and never receives a second one.
-	// When false, a new target may supersede an unfinished round.
-	RejectRepeatedUpdate bool
-	// ExactResourceMatch prevents a target resource change from taking the
-	// metadata-only fast path. SUO must validate the requested target, whereas
-	// Claim preserves its legacy resource-coverage comparison.
-	ExactResourceMatch bool
-}
-
-var (
-	// claimInplaceEngineOptions reproduces the pre-SUO claim delivery behavior.
-	claimInplaceEngineOptions = inplaceEngineOptions{
-		QoSMode:              inplaceupdate.CompatibilityMode,
-		RejectRepeatedUpdate: true,
-	}
-	// upgradeInplaceEngineOptions lets a new SUO correct an unfinished target.
-	upgradeInplaceEngineOptions = inplaceEngineOptions{
-		QoSMode:            inplaceupdate.TargetConvergenceMode,
-		ExactResourceMatch: true,
-	}
-)
-
-// SUO 在 UpgradePod 的实际写入前校验；不改变共享 PreUpgrade 的执行时机。
-// The QoS pre-check is deliberately not part of this step: it only guards a
-// write, so it runs after the caller's repeated-update policy has decided that
-// a write will actually be attempted.
+// The QoS pre-check is deliberately not part of validation: it only guards a
+// write, so it runs immediately before the update is attempted.
 func validateInplaceUpdate(pod *corev1.Pod, box *agentsv1alpha1.Sandbox) (*inplaceupdate.InPlaceUpdateState, error) {
 	if pod.Labels[agentsv1alpha1.PodLabelTemplateHash] == "" {
 		return nil, newInplaceError(inplaceClassUntrackedPod, "pod has no template-hash label and does not support in-place update")
@@ -186,7 +148,7 @@ func validateInplaceUpdate(pod *corev1.Pod, box *agentsv1alpha1.Sandbox) (*inpla
 // Configuration taking effect and final Ready are judged separately; the wait
 // diagnostics are produced by the adapter based on Pod status.
 func handleInPlaceUpdateCommon(ctx context.Context, control *inplaceupdate.InPlaceUpdateControl,
-	pod *corev1.Pod, box *agentsv1alpha1.Sandbox, targetRevision string, engineOpts inplaceEngineOptions,
+	pod *corev1.Pod, box *agentsv1alpha1.Sandbox, targetRevision string,
 ) (inplaceUpdateStepResult, error) {
 	if err := ctx.Err(); err != nil {
 		return inplaceUpdateStepInProgress, wrapInplaceError(inplaceClassUpdateFailed, "update cancelled", err)
@@ -201,29 +163,19 @@ func handleInPlaceUpdateCommon(ctx context.Context, control *inplaceupdate.InPla
 		return observeInplaceUpdate(ctx, pod, state)
 	}
 
-	// An earlier round is still recorded on the pod. Whether the new target may
-	// supersede it is the caller's policy; either way an unfinished earlier round
-	// must not let a metadata-only write report success before it takes effect.
+	// An earlier round may still be recorded on the pod. The latest target
+	// supersedes it for both Claim and SUO. Keep track of pending state only so
+	// metadata delivery cannot report success before the replacement target has
+	// taken effect.
 	previousPending := false
 	if state != nil {
 		completed, completedErr := inplaceupdate.IsInplaceUpdateCompleted(ctx, pod, state)
-		// A terminal failure of the earlier round means it will never complete;
-		// treat it as pending so the policy below decides what happens to it.
 		previousPending = !completed || completedErr != nil
-		if engineOpts.RejectRepeatedUpdate {
-			if previousPending {
-				// Nothing written and no error: the only InProgress outcome without
-				// an error, so callers can tell "waiting for the earlier round" apart
-				// from a rejected pre-check.
-				return inplaceUpdateStepInProgress, nil
-			}
-			return inplaceUpdateStepInProgress, newInplaceError(inplaceClassRepeatedUpdate, "currently, multiple in-place updates are not supported")
-		}
 	}
 
-	metadataOnly := isMetadataOnlyChangeForEngine(pod, box, engineOpts.ExactResourceMatch)
+	metadataOnly := isMetadataOnlyChange(pod, box)
 	if !metadataOnly {
-		if orig, target, changed := engineOpts.QoSMode.CheckResizeQoSChange(box, pod); changed {
+		if orig, target, changed := inplaceupdate.CheckResizeQoSChange(box, pod); changed {
 			return inplaceUpdateStepInProgress, newInplaceError(inplaceClassQoSRejected,
 				fmt.Sprintf("resource resize would change QoS class from %s to %s, resize rejected", orig, target))
 		}
@@ -281,15 +233,10 @@ func describeInplaceWaitReason(pod *corev1.Pod) string {
 }
 
 // isMetadataOnlyChange returns true if the only difference between the pod and
-// sandbox template is metadata under the Claim resource-coverage contract.
+// sandbox template is metadata. Template-declared resources are compared as a
+// subset so admission-injected extras do not turn metadata-only changes into
+// an in-place update.
 func isMetadataOnlyChange(pod *corev1.Pod, box *agentsv1alpha1.Sandbox) bool {
-	return isMetadataOnlyChangeForEngine(pod, box, false)
-}
-
-// isMetadataOnlyChangeForEngine applies the resource comparison selected by
-// the caller. Claim accepts resources that cover the requested template, while
-// SUO must compare the exact target so QoS validation cannot be bypassed.
-func isMetadataOnlyChangeForEngine(pod *corev1.Pod, box *agentsv1alpha1.Sandbox, exactResourceMatch bool) bool {
 	if box.Spec.Template == nil {
 		return false
 	}
@@ -307,11 +254,7 @@ func isMetadataOnlyChangeForEngine(pod *corev1.Pod, box *agentsv1alpha1.Sandbox,
 		if origin.Image != container.Image {
 			return false
 		}
-		if exactResourceMatch {
-			if !inplaceupdate.ResourcesExactlyEqual(origin.Resources, container.Resources) {
-				return false
-			}
-		} else if !inplaceupdate.IsResourceSatisfied(origin.Resources, container.Resources) {
+		if !inplaceupdate.IsResourceSatisfied(origin.Resources, container.Resources) {
 			return false
 		}
 	}

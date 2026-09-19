@@ -428,11 +428,14 @@ var _ = Describe("InplaceUpdate Claim Path (SandboxClaim delivery)", func() {
 	// Transient failure (no delivery, stays InplaceUpdating)
 	// =========================================================================
 
-	Context("Transient failure (no delivery)", func() {
-		It("should not deliver when image pull fails (stays InplaceUpdating)", func() {
+	Context("Transient failure recovery", func() {
+		It("should deliver when a corrected image supersedes a failed target", func() {
 			sbx := newClaimSandbox(fmt.Sprintf("claim-badimg-%d", time.Now().UnixNano()))
 			Expect(k8sClient.Create(ctx, sbx)).To(Succeed())
 			waitSandboxRunning(sbx)
+			originalPod := &corev1.Pod{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbx.Name, Namespace: sbx.Namespace}, originalPod)).To(Succeed())
+			originalPodUID := originalPod.UID
 
 			By("Updating sandbox template image to a non-pullable image")
 			updateSandboxTemplate(sbx, func(spec *corev1.PodTemplateSpec) {
@@ -466,6 +469,28 @@ var _ = Describe("InplaceUpdate Claim Path (SandboxClaim delivery)", func() {
 			Expect(readyCond).NotTo(BeNil())
 			Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
 			Expect(readyCond.Reason).To(Equal(agentsv1alpha1.SandboxReadyReasonInplaceUpdating))
+
+			By("Correcting the template image with a new in-place target")
+			updateSandboxTemplate(sbx, func(spec *corev1.PodTemplateSpec) {
+				spec.Spec.Containers[0].Image = updateImage
+			})
+			waitPodImage(sbx, updateImage, 2*time.Minute)
+
+			By("Verifying the corrected target completes on the same Pod")
+			Eventually(func() string {
+				cond := getInplaceUpdateCondition(sbx)
+				if cond == nil {
+					return ""
+				}
+				return string(cond.Status) + "/" + cond.Reason
+			}, 2*time.Minute, time.Second).Should(Equal(string(metav1.ConditionTrue) + "/" + agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded))
+			readyCond = getReadyCondition(sbx)
+			Expect(readyCond).NotTo(BeNil())
+			Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(readyCond.Reason).To(Equal(agentsv1alpha1.SandboxReadyReasonPodReady))
+			updatedPod := &corev1.Pod{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbx.Name, Namespace: sbx.Namespace}, updatedPod)).To(Succeed())
+			Expect(updatedPod.UID).To(Equal(originalPodUID))
 		})
 	})
 

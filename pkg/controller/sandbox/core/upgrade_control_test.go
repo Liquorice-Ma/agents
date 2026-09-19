@@ -1416,9 +1416,9 @@ func TestExecuteUpgradePodStep_Branches(t *testing.T) {
 	}
 }
 
-// 新操作可以在旧镜像拉取失败时下发回滚目标，并保留原 Pod。
-// 共享引擎仍使用 CompatibilityMode：ImageID 不变时继续等待；
-// ImageID 变化后还需等待 Pod Ready，不能套用目标模式的同 ImageID 完成规则。
+// A new operation can apply a rollback target after an earlier image pull
+// failure while retaining the original Pod. Completion requires the target
+// image to run and the Pod to become Ready.
 func TestInplaceUpgradeRollbackWhileStuck(t *testing.T) {
 	box := newUpgradeTestSandbox(nil, &agentsv1alpha1.SandboxUpgradePolicy{
 		Type: agentsv1alpha1.SandboxUpgradePolicyInplaceUpdate,
@@ -1478,7 +1478,8 @@ func TestInplaceUpgradeRollbackWhileStuck(t *testing.T) {
 	require.Equal(t, "old-revision", state.Revision)
 	require.True(t, state.UpdateImages)
 	require.Equal(t, "img-old", state.LastContainerStatuses["sandbox"].ImageID)
-	require.Empty(t, state.LastContainerStatuses["sandbox"].TargetImage, "兼容模式只记录 ImageID 基线")
+	require.Equal(t, "test:v1", state.LastContainerStatuses["sandbox"].TargetImage)
+
 	// Delivery does not mean it took effect; the real backoff reason is still
 	// written into Message.
 	c := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
@@ -1495,7 +1496,7 @@ func TestInplaceUpgradeRollbackWhileStuck(t *testing.T) {
 		wantSucceeded bool
 	}{
 		{name: "same image ID and not ready waits", imageID: "img-old"},
-		{name: "same image ID and ready still waits", imageID: "img-old", podReady: true},
+		{name: "same image ID and ready succeeds", imageID: "img-old", podReady: true, wantSucceeded: true},
 		{name: "changed image ID but not ready waits", imageID: "img-new"},
 		{name: "changed image ID and ready succeeds", imageID: "img-new", podReady: true, wantSucceeded: true},
 	} {

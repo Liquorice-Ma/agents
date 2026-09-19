@@ -410,8 +410,8 @@ func TestCommonControl_EnsureSandboxUpdated(t *testing.T) {
 		{name: "claim infeasible resize fails and keeps pod usable", claimKind: "Infeasible", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed, expectEvent: "InplaceUpdateFailed"},
 		{name: "claim deferred resize fails and keeps pod usable", claimKind: "Deferred", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed, expectEvent: "InplaceUpdateFailed"},
 		{name: "claim image pending keeps readiness closed", claimKind: "image-pending", wait: true},
-		{name: "claim completed old record ignores new target", claimKind: "old-complete", expectReady: true, expectEvent: "InplaceUpdateForbidden"},
-		{name: "claim pending old record waits for it", claimKind: "old-pending", wait: true, expectEvent: "InplaceUpdateForbidden"},
+		{name: "claim completed old record accepts new target", claimKind: "old-complete", expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating, wait: true},
+		{name: "claim pending old record accepts new target", claimKind: "old-pending", expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating, wait: true},
 		{
 			name: "pod does not exist, should set failed phase",
 			args: EnsureFuncArgs{
@@ -706,10 +706,9 @@ func TestCommonControl_EnsureSandboxUpdated(t *testing.T) {
 					require.Equal(t, int64(500), request.MilliValue())
 					require.Equal(t, int64(500), limit.MilliValue())
 				case "old-complete", "old-pending":
-					// Claim never issues a second in-place round: the new target is
-					// left unapplied and the pod keeps the old revision.
-					require.Equal(t, "old", storedPod.Labels[agentsv1alpha1.PodLabelTemplateHash])
-					require.Equal(t, "test:v1", storedPod.Spec.Containers[0].Image)
+					// The latest template supersedes the earlier in-place target.
+					require.Equal(t, "target", storedPod.Labels[agentsv1alpha1.PodLabelTemplateHash])
+					require.Equal(t, "test:v2", storedPod.Spec.Containers[0].Image)
 				}
 				// The produced status must agree with the cache-side wait: only an
 				// early-returned round keeps Ready closed.

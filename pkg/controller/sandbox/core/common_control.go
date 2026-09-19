@@ -457,9 +457,9 @@ func isInplaceUpdateTerminal(newStatus *agentsv1alpha1.SandboxStatus) bool {
 }
 
 // handleInplaceUpdateSandbox is the SandboxClaim delivery adapter over the shared
-// in-place engine. It keeps the pre-SUO claim contract: a pod is updated in
-// place at most once, a terminal InplaceUpdate condition is never re-evaluated,
-// and done=true hands Ready back to the caller's probe and status sync.
+// in-place engine. The latest target may supersede an earlier in-place round;
+// a terminal condition for the current target is never re-evaluated, and
+// done=true hands Ready back to the caller's probe and status sync.
 func (r *commonControl) handleInplaceUpdateSandbox(ctx context.Context, args EnsureFuncArgs) (done bool, err error) {
 	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
 	logger := klog.FromContext(ctx)
@@ -475,7 +475,7 @@ func (r *commonControl) handleInplaceUpdateSandbox(ctx context.Context, args Ens
 	}
 
 	metadataOnly := !hashMatched && isMetadataOnlyChange(pod, box)
-	result, err := handleInPlaceUpdateCommon(ctx, r.inplaceUpdateControl, pod, box, newStatus.UpdateRevision, claimInplaceEngineOptions)
+	result, err := handleInPlaceUpdateCommon(ctx, r.inplaceUpdateControl, pod, box, newStatus.UpdateRevision)
 
 	if err != nil {
 		switch classifyInplaceError(err) {
@@ -487,21 +487,9 @@ func (r *commonControl) handleInplaceUpdateSandbox(ctx context.Context, args Ens
 			r.recorder.Eventf(box, corev1.EventTypeWarning, "InplaceUpdateForbidden",
 				"InplaceUpdate only support image, resources, metadata")
 			return true, nil
-		case inplaceClassRepeatedUpdate:
-			// currently, multiple in-place updates are not supported.
-			logger.Info("currently, multiple in-place updates are not supported", "sandbox", klog.KObj(box))
-			r.recorder.Eventf(box, corev1.EventTypeWarning, "InplaceUpdateForbidden", err.Error())
-			return true, nil
 		case inplaceClassStateCorrupted:
 			return false, err
 		}
-	}
-	if !hashMatched && result == inplaceUpdateStepInProgress && err == nil {
-		// Waiting for an earlier round to finish; nothing was written this round.
-		logger.Info("currently, multiple in-place updates are not supported", "sandbox", klog.KObj(box))
-		r.recorder.Eventf(box, corev1.EventTypeWarning, "InplaceUpdateForbidden",
-			"currently, multiple in-place updates are not supported")
-		return false, nil
 	}
 
 	if hashMatched {

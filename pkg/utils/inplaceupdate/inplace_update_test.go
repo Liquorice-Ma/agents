@@ -865,124 +865,107 @@ func TestInPlaceUpdateControl_Update_ResizeConflictRetrySucceeds(t *testing.T) {
 }
 
 func TestInPlaceUpdateControl_Update_ResizeConflictRetryNoLongerNeeded(t *testing.T) {
-	for name, mode := range map[string]UpdateMode{"compatibility": CompatibilityMode, "target": TargetConvergenceMode} {
-		t.Run(name, func(t *testing.T) {
-			scheme := buildTestScheme(t)
-			pod := &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default"},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{
-						Name:  "c",
-						Image: "img:1",
-						Resources: corev1.ResourceRequirements{
-							Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
-						},
-					}},
-				},
-			}
-			box := &agentsv1alpha1.Sandbox{
-				Spec: agentsv1alpha1.SandboxSpec{
-					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
-						Template: &corev1.PodTemplateSpec{
-							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{{
-									Name:  "c",
-									Image: "img:1",
-									Resources: corev1.ResourceRequirements{
-										Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("750m")},
-									},
-								}},
-							},
+	t.Run("compatibility", func(t *testing.T) {
+		scheme := buildTestScheme(t)
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default"},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{
+					Name:  "c",
+					Image: "img:1",
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
+					},
+				}},
+			},
+		}
+		box := &agentsv1alpha1.Sandbox{
+			Spec: agentsv1alpha1.SandboxSpec{
+				EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+					Template: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{
+								Name:  "c",
+								Image: "img:1",
+								Resources: corev1.ResourceRequirements{
+									Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("750m")},
+								},
+							}},
 						},
 					},
 				},
-			}
+			},
+		}
 
-			base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
-			resizeAttempts := 0
-			wrapped := interceptor.NewClient(base, interceptor.Funcs{
-				SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object,
-					patch client.Patch, opts ...client.SubResourcePatchOption) error {
-					if sub != "resize" {
-						return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
-					}
-					resizeAttempts++
-					// Simulate that another actor has already applied the resize, so
-					// recomputing resize containers from the latest pod returns nil and the
-					// retry loop should exit successfully without a re-attempt.
-					latest := &corev1.Pod{}
-					if err := c.Get(ctx, client.ObjectKeyFromObject(obj), latest); err != nil {
-						return err
-					}
-					latest.Spec.Containers[0].Resources.Requests = corev1.ResourceList{
-						corev1.ResourceCPU: resource.MustParse("750m"),
-					}
-					if err := c.Update(ctx, latest); err != nil {
-						return err
-					}
-					return apierrors.NewConflict(
-						schema.GroupResource{Resource: "pods"}, obj.GetName(),
-						fmt.Errorf("the object has been modified"),
-					)
-				},
-			})
-			ctrl := NewInPlaceUpdateControl(wrapped, nil)
-			require.NoError(t, ctrl.Get(t.Context(), client.ObjectKeyFromObject(pod), pod))
-
-			progressed, err := ctrl.Update(context.Background(), InPlaceUpdateOptions{
-				Mode:     mode,
-				Box:      box,
-				Pod:      pod,
-				Revision: "rev",
-			})
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if !progressed {
-				t.Fatalf("expected progressed=true (metadata patch already applied)")
-			}
-			if resizeAttempts != 1 {
-				t.Fatalf("expected exactly 1 resize attempt (no retry needed when resize is no-op), got %d",
-					resizeAttempts)
-			}
-
-			updated := &corev1.Pod{}
-			if err := ctrl.Get(context.Background(),
-				types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, updated); err != nil {
-				t.Fatalf("get updated pod: %v", err)
-			}
-			if updated.Labels[agentsv1alpha1.PodLabelTemplateHash] != "rev" {
-				t.Fatalf("expected pod-template-hash=rev, got %q", updated.Labels[agentsv1alpha1.PodLabelTemplateHash])
-			}
-			state, err := GetPodInPlaceUpdateState(updated)
-			if err != nil {
-				t.Fatalf("get inplace update state failed: %v", err)
-			}
-			if mode == TargetConvergenceMode {
-				require.NotNil(t, state)
-				require.True(t, state.UpdateResources)
-				completed, err := mode.IsInplaceUpdateCompleted(t.Context(), updated, state)
-				require.NoError(t, err)
-				require.False(t, completed, "spec 已写入，但 status 尚未确认资源生效")
-				updated.Status.ContainerStatuses = []corev1.ContainerStatus{{
-					Name: "c", Resources: updated.Spec.Containers[0].Resources.DeepCopy(),
-				}}
-				completed, err = mode.IsInplaceUpdateCompleted(t.Context(), updated, state)
-				require.NoError(t, err)
-				require.True(t, completed)
-			} else {
-				require.Nil(t, state, "兼容模式保留 Conflict 重算后无需 resize 的原有结果")
-				completed, err := IsInplaceUpdateCompleted(t.Context(), updated, state)
-				require.NoError(t, err)
-				require.True(t, completed)
-			}
-
-			cpuReq := updated.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]
-			if cpuReq.MilliValue() != 750 {
-				t.Fatalf("expected cpu request=750m after conflict handoff, got %dm", cpuReq.MilliValue())
-			}
+		base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
+		resizeAttempts := 0
+		wrapped := interceptor.NewClient(base, interceptor.Funcs{
+			SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+				patch client.Patch, opts ...client.SubResourcePatchOption) error {
+				if sub != "resize" {
+					return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
+				}
+				resizeAttempts++
+				// Simulate that another actor has already applied the resize, so
+				// recomputing resize containers from the latest pod returns nil and the
+				// retry loop should exit successfully without a re-attempt.
+				latest := &corev1.Pod{}
+				if err := c.Get(ctx, client.ObjectKeyFromObject(obj), latest); err != nil {
+					return err
+				}
+				latest.Spec.Containers[0].Resources.Requests = corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("750m"),
+				}
+				if err := c.Update(ctx, latest); err != nil {
+					return err
+				}
+				return apierrors.NewConflict(
+					schema.GroupResource{Resource: "pods"}, obj.GetName(),
+					fmt.Errorf("the object has been modified"),
+				)
+			},
 		})
-	}
+		ctrl := NewInPlaceUpdateControl(wrapped, nil)
+		require.NoError(t, ctrl.Get(t.Context(), client.ObjectKeyFromObject(pod), pod))
+
+		progressed, err := ctrl.Update(context.Background(), InPlaceUpdateOptions{
+			Box:      box,
+			Pod:      pod,
+			Revision: "rev",
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !progressed {
+			t.Fatalf("expected progressed=true (metadata patch already applied)")
+		}
+		if resizeAttempts != 1 {
+			t.Fatalf("expected exactly 1 resize attempt (no retry needed when resize is no-op), got %d",
+				resizeAttempts)
+		}
+
+		updated := &corev1.Pod{}
+		if err := ctrl.Get(context.Background(),
+			types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, updated); err != nil {
+			t.Fatalf("get updated pod: %v", err)
+		}
+		if updated.Labels[agentsv1alpha1.PodLabelTemplateHash] != "rev" {
+			t.Fatalf("expected pod-template-hash=rev, got %q", updated.Labels[agentsv1alpha1.PodLabelTemplateHash])
+		}
+		state, err := GetPodInPlaceUpdateState(updated)
+		if err != nil {
+			t.Fatalf("get inplace update state failed: %v", err)
+		}
+		require.Nil(t, state, "conflict recomputation needs no resize state")
+		completed, err := IsInplaceUpdateCompleted(t.Context(), updated, state)
+		require.NoError(t, err)
+		require.True(t, completed)
+
+		cpuReq := updated.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]
+		if cpuReq.MilliValue() != 750 {
+			t.Fatalf("expected cpu request=750m after conflict handoff, got %dm", cpuReq.MilliValue())
+		}
+	})
 }
 
 func TestInPlaceUpdateControl_Update_ResizeConflictGetFails(t *testing.T) {
@@ -1087,7 +1070,7 @@ func TestInPlaceUpdateControl_PatchPodResources_Conflict(t *testing.T) {
 			Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
 		},
 	}}
-	err := ctrl.patchPodResources(context.Background(), klog.NewKlogr(), pod, resizeContainers, CompatibilityMode)
+	err := ctrl.patchPodResources(context.Background(), klog.NewKlogr(), pod, resizeContainers)
 	if err == nil {
 		t.Fatalf("expected error from conflicted patch")
 	}
@@ -1264,52 +1247,6 @@ func TestNewInPlaceUpdateControl(t *testing.T) {
 	}
 }
 
-func TestImageTargetCompletion(t *testing.T) {
-	tests := []struct {
-		name         string
-		image        string
-		target       string
-		running      bool
-		waiting      string
-		wantDone     bool
-		wantTerminal bool
-	}{
-		{name: "rollback may keep original image ID", image: "nginx:1", target: "nginx:1", running: true, wantDone: true},
-		{name: "normalized target", image: "docker.io/library/nginx:latest", target: "nginx", running: true, wantDone: true},
-		{name: "old running image", image: "nginx:1", target: "nginx:2", running: true},
-		{name: "target not running", image: "nginx:2", target: "nginx:2"},
-		{name: "pull backoff waits", image: "nginx:2", target: "nginx:2", waiting: "ImagePullBackOff"},
-		{name: "old invalid image ignored", image: "INVALID", target: "nginx:2", waiting: "InvalidImageName"},
-		{name: "current invalid image fails", image: "INVALID", target: "INVALID", waiting: "InvalidImageName", wantTerminal: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			state := &InPlaceUpdateState{UpdateImages: true, LastContainerStatuses: map[string]InPlaceUpdateContainerStatus{
-				"main": {ImageID: "same-id", TargetImage: tt.target},
-			}}
-			status := corev1.ContainerStatus{Name: "main", Image: tt.image, ImageID: "same-id"}
-			if tt.running {
-				status.State.Running = &corev1.ContainerStateRunning{}
-			}
-			if tt.waiting != "" {
-				status.State.Waiting = &corev1.ContainerStateWaiting{Reason: tt.waiting}
-			}
-			pod := &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{status}}}
-			compatDone, compatErr := CompatibilityMode.IsInplaceUpdateCompleted(t.Context(), pod, state)
-			require.NoError(t, compatErr)
-			require.False(t, compatDone, "兼容模式仍要求 ImageID 发生变化")
-			done, err := TargetConvergenceMode.IsInplaceUpdateCompleted(t.Context(), pod, state)
-			require.Equal(t, tt.wantDone, done)
-			if tt.wantTerminal {
-				var imageErr *ImagePullFailedError
-				require.ErrorAs(t, err, &imageErr)
-			} else {
-				require.NoError(t, err)
-			}
-		})
-	}
-}
-
 func TestResizeNotSupportedError(t *testing.T) {
 	inner := fmt.Errorf("boom")
 	err := &ResizeNotSupportedError{Err: inner}
@@ -1480,56 +1417,43 @@ func TestDefaultGeneratePatchBodyFunc_ImageOnly(t *testing.T) {
 		},
 	}
 
-	for _, tt := range []struct {
-		name        string
-		mode        UpdateMode
-		targetImage string
-	}{
-		{name: "compatibility", mode: CompatibilityMode},
-		{name: "target", mode: TargetConvergenceMode, targetImage: "new"},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			body, err := DefaultGeneratePatchBodyFunc(InPlaceUpdateOptions{
-				Box:      box,
-				Pod:      pod,
-				Revision: "rev-img",
-				Mode:     tt.mode,
-			})
-			require.NoError(t, err)
-			if body == "" {
-				t.Fatalf("expected non-empty body for image change")
-			}
+	body, err := DefaultGeneratePatchBodyFunc(InPlaceUpdateOptions{
+		Box:      box,
+		Pod:      pod,
+		Revision: "rev-img",
+	})
+	require.NoError(t, err)
+	if body == "" {
+		t.Fatalf("expected non-empty body for image change")
+	}
 
-			var decoded map[string]any
-			if err := json.Unmarshal([]byte(body), &decoded); err != nil {
-				t.Fatalf("unmarshal patch: %v", err)
-			}
-			metadata, _ := decoded["metadata"].(map[string]any)
-			labels, _ := metadata["labels"].(map[string]any)
-			if labels["app"] != "new" {
-				t.Fatalf("expected app label updated, got %v", labels)
-			}
-			if _, exists := labels["already"]; exists {
-				t.Fatalf("labels already in sync should not be patched again")
-			}
-			if labels[agentsv1alpha1.PodLabelTemplateHash] != "rev-img" {
-				t.Fatalf("expected template hash label, got %v", labels)
-			}
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(body), &decoded); err != nil {
+		t.Fatalf("unmarshal patch: %v", err)
+	}
+	metadata, _ := decoded["metadata"].(map[string]any)
+	labels, _ := metadata["labels"].(map[string]any)
+	if labels["app"] != "new" {
+		t.Fatalf("expected app label updated, got %v", labels)
+	}
+	if _, exists := labels["already"]; exists {
+		t.Fatalf("labels already in sync should not be patched again")
+	}
+	if labels[agentsv1alpha1.PodLabelTemplateHash] != "rev-img" {
+		t.Fatalf("expected template hash label, got %v", labels)
+	}
 
-			annotations, _ := metadata["annotations"].(map[string]any)
-			stateRaw, _ := annotations[PodAnnotationInPlaceUpdateStateKey].(string)
-			state := &InPlaceUpdateState{}
-			if err := json.Unmarshal([]byte(stateRaw), state); err != nil {
-				t.Fatalf("decode state: %v", err)
-			}
-			if !state.UpdateImages || state.UpdateResources {
-				t.Fatalf("expected only updateImages=true, got %+v", state)
-			}
-			if state.LastContainerStatuses["c"].ImageID != "old-id" {
-				t.Fatalf("expected previous image id captured, got %+v", state.LastContainerStatuses)
-			}
-			require.Equal(t, tt.targetImage, state.LastContainerStatuses["c"].TargetImage)
-		})
+	annotations, _ := metadata["annotations"].(map[string]any)
+	stateRaw, _ := annotations[PodAnnotationInPlaceUpdateStateKey].(string)
+	state := &InPlaceUpdateState{}
+	if err := json.Unmarshal([]byte(stateRaw), state); err != nil {
+		t.Fatalf("decode state: %v", err)
+	}
+	if !state.UpdateImages || state.UpdateResources {
+		t.Fatalf("expected only updateImages=true, got %+v", state)
+	}
+	if state.LastContainerStatuses["c"].ImageID != "old-id" {
+		t.Fatalf("expected previous image id captured, got %+v", state.LastContainerStatuses)
 	}
 }
 
@@ -1828,7 +1752,6 @@ func TestIsPodResourceResizeCompleted(t *testing.T) {
 		name       string
 		pod        *corev1.Pod
 		expectDone bool
-		compatOnly bool
 	}{
 		{
 			name: "no container statuses",
@@ -1852,8 +1775,7 @@ func TestIsPodResourceResizeCompleted(t *testing.T) {
 			expectDone: false,
 		},
 		{
-			name:       "resource decrease waits only in target mode",
-			compatOnly: true,
+			name: "covered resources are complete",
 			pod: &corev1.Pod{
 				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Resources: tmpl}}},
 				Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
@@ -1863,7 +1785,7 @@ func TestIsPodResourceResizeCompleted(t *testing.T) {
 					},
 				}}},
 			},
-			expectDone: false,
+			expectDone: true,
 		},
 		{
 			name: "requests do not match",
@@ -1965,8 +1887,7 @@ func TestIsPodResourceResizeCompleted(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.expectDone || tt.compatOnly, isPodResourceResizeCompleted(tt.pod))
-			require.Equal(t, tt.expectDone, TargetConvergenceMode.isPodResourceResizeCompleted(tt.pod))
+			require.Equal(t, tt.expectDone, isPodResourceResizeCompleted(tt.pod))
 		})
 	}
 }
@@ -2364,7 +2285,7 @@ func TestIsInplaceUpdateCompletedWithResourceConditions(t *testing.T) {
 		t.Fatalf("expected error containing 'infeasible', got: %v", terminalErr)
 	}
 
-	// Deferred 在兼容模式中仍报错；仅目标收敛模式继续等待。
+	// Deferred is terminal for the shared in-place update behavior.
 	pod.Status.Resize = ""
 	pod.Status.Conditions = []corev1.PodCondition{
 		{
@@ -2379,9 +2300,6 @@ func TestIsInplaceUpdateCompletedWithResourceConditions(t *testing.T) {
 		t.Fatalf("expected incomplete when resize is deferred")
 	}
 	require.ErrorContains(t, terminalErr, "deferred")
-	completed, terminalErr = TargetConvergenceMode.IsInplaceUpdateCompleted(t.Context(), pod, state)
-	require.False(t, completed)
-	require.NoError(t, terminalErr)
 
 	pod.Status.Resize = ""
 	pod.Status.Conditions = nil
@@ -2402,14 +2320,11 @@ func TestIsInplaceUpdateCompletedWithResourceConditions(t *testing.T) {
 	if terminalErr != nil {
 		t.Fatalf("unexpected terminal error: %v", terminalErr)
 	}
-	// 同一份超配 status：兼容模式已满足目标，SUO 必须等待降配生效。
+	// Covered resources satisfy the shared in-place update target.
 	pod.Status.ContainerStatuses[0].Resources.Requests[corev1.ResourceCPU] = resource.MustParse("1500m")
 	completed, terminalErr = IsInplaceUpdateCompleted(t.Context(), pod, state)
 	require.NoError(t, terminalErr)
 	require.True(t, completed)
-	completed, terminalErr = TargetConvergenceMode.IsInplaceUpdateCompleted(t.Context(), pod, state)
-	require.NoError(t, terminalErr)
-	require.False(t, completed)
 	box := &agentsv1alpha1.Sandbox{Spec: agentsv1alpha1.SandboxSpec{
 		EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 			Template: &corev1.PodTemplateSpec{Spec: *pod.Spec.DeepCopy()},
@@ -2417,7 +2332,6 @@ func TestIsInplaceUpdateCompletedWithResourceConditions(t *testing.T) {
 	}}
 	pod.Spec.Containers[0].Resources = *pod.Status.ContainerStatuses[0].Resources.DeepCopy()
 	require.Empty(t, DefaultBuildResizeContainers(InPlaceUpdateOptions{Box: box, Pod: pod}))
-	require.Len(t, DefaultBuildResizeContainers(InPlaceUpdateOptions{Box: box, Pod: pod, Mode: TargetConvergenceMode}), 1)
 }
 
 func Test_checkPodResizeInfeasible(t *testing.T) {
@@ -2491,7 +2405,7 @@ func Test_checkPodResizeInfeasible(t *testing.T) {
 					},
 				},
 			},
-			wantErr: false,
+			wantErr: true,
 		},
 		{
 			name: "deprecated Resize field is Deferred",
@@ -2500,7 +2414,7 @@ func Test_checkPodResizeInfeasible(t *testing.T) {
 					Resize: corev1.PodResizeStatusDeferred,
 				},
 			},
-			wantErr: false,
+			wantErr: true,
 		},
 		{
 			name: "PodResizePending is False - no error",
@@ -2529,7 +2443,7 @@ func Test_checkPodResizeInfeasible(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := TargetConvergenceMode.checkPodResizeInfeasible(tt.pod)
+			err := checkPodResizeInfeasible(tt.pod)
 			if tt.wantErr {
 				var resizeErr *ResizeInfeasibleError
 				require.ErrorAs(t, err, &resizeErr)
@@ -2554,136 +2468,6 @@ func Test_checkPodResizeInfeasible(t *testing.T) {
 				}
 			} else {
 				require.NoError(t, compatErr)
-			}
-		})
-	}
-}
-
-func Test_checkPodImagePullFailed(t *testing.T) {
-	state := &InPlaceUpdateState{
-		LastContainerStatuses: map[string]InPlaceUpdateContainerStatus{
-			"main": {ImageID: "docker://sha256:old"},
-		},
-	}
-	tests := []struct {
-		name      string
-		pod       *corev1.Pod
-		wantErr   bool
-		errSubstr string
-	}{
-		{
-			name: "no waiting state - no error",
-			pod: &corev1.Pod{
-				Status: corev1.PodStatus{
-					ContainerStatuses: []corev1.ContainerStatus{
-						{Name: "main"},
-					},
-				},
-			},
-		},
-		{
-			name: "tracked container InvalidImageName",
-			pod: &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
-				Name: "main", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "InvalidImageName"}},
-			}}}},
-			wantErr: true, errSubstr: "InvalidImageName",
-		},
-		{
-			name: "tracked container ErrImageNeverPull",
-			pod: &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
-				Name: "main", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ErrImageNeverPull"}},
-			}}}},
-			wantErr: true, errSubstr: "ErrImageNeverPull",
-		},
-		{
-			name: "tracked container ErrImagePull",
-			pod: &corev1.Pod{
-				Status: corev1.PodStatus{
-					ContainerStatuses: []corev1.ContainerStatus{
-						{
-							Name: "main",
-							State: corev1.ContainerState{
-								Waiting: &corev1.ContainerStateWaiting{
-									Reason:  "ErrImagePull",
-									Message: "manifest unknown",
-								},
-							},
-						},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "tracked container ImagePullBackOff",
-			pod: &corev1.Pod{
-				Status: corev1.PodStatus{
-					ContainerStatuses: []corev1.ContainerStatus{
-						{
-							Name: "main",
-							State: corev1.ContainerState{
-								Waiting: &corev1.ContainerStateWaiting{
-									Reason: "ImagePullBackOff",
-								},
-							},
-						},
-					},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "tracked container waiting for another reason - no error",
-			pod: &corev1.Pod{
-				Status: corev1.PodStatus{
-					ContainerStatuses: []corev1.ContainerStatus{
-						{
-							Name: "main",
-							State: corev1.ContainerState{
-								Waiting: &corev1.ContainerStateWaiting{
-									Reason: "ContainerCreating",
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-		{
-			name: "untracked container pull failure - no error",
-			pod: &corev1.Pod{
-				Status: corev1.PodStatus{
-					ContainerStatuses: []corev1.ContainerStatus{
-						{
-							Name: "sidecar",
-							State: corev1.ContainerState{
-								Waiting: &corev1.ContainerStateWaiting{
-									Reason: "ImagePullBackOff",
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := checkPodImagePullFailed(tt.pod, state)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatalf("expected error containing %q, got nil", tt.errSubstr)
-				}
-				var pullErr *ImagePullFailedError
-				if !errors.As(err, &pullErr) {
-					t.Fatalf("expected *ImagePullFailedError, got %T: %v", err, err)
-				}
-				if !strings.Contains(err.Error(), tt.errSubstr) {
-					t.Fatalf("expected error containing %q, got: %v", tt.errSubstr, err)
-				}
-			} else if err != nil {
-				t.Fatalf("unexpected error: %v", err)
 			}
 		})
 	}
@@ -2892,13 +2676,12 @@ func TestDefaultGeneratePatchBodyFunc_TemplateAnnotations(t *testing.T) {
 
 func TestCheckResizeQoSChange(t *testing.T) {
 	tests := []struct {
-		name          string
-		box           *agentsv1alpha1.Sandbox
-		pod           *corev1.Pod
-		wantOrig      corev1.PodQOSClass
-		wantUpdated   corev1.PodQOSClass
-		wantChanged   bool
-		compatUpdated corev1.PodQOSClass
+		name        string
+		box         *agentsv1alpha1.Sandbox
+		pod         *corev1.Pod
+		wantOrig    corev1.PodQOSClass
+		wantUpdated corev1.PodQOSClass
+		wantChanged bool
 	}{
 		{
 			name: "no QoS change - Burstable stays Burstable",
@@ -3005,8 +2788,7 @@ func TestCheckResizeQoSChange(t *testing.T) {
 					Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1"), corev1.ResourceMemory: resource.MustParse("1Gi")},
 				},
 			}}}},
-			wantOrig: corev1.PodQOSGuaranteed, wantUpdated: corev1.PodQOSGuaranteed,
-			compatUpdated: corev1.PodQOSBestEffort,
+			wantOrig: corev1.PodQOSGuaranteed, wantUpdated: corev1.PodQOSBestEffort, wantChanged: true,
 		},
 		{
 			name: "nil template - no change",
@@ -3029,26 +2811,10 @@ func TestCheckResizeQoSChange(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			orig, updated, changed := TargetConvergenceMode.CheckResizeQoSChange(tt.box, tt.pod)
-			compatOrig, compatUpdated, compatChanged := CheckResizeQoSChange(tt.box, tt.pod)
-			wantCompat := tt.wantUpdated
-			if tt.compatUpdated != "" {
-				wantCompat = tt.compatUpdated
-			}
-			require.Equal(t, tt.wantOrig, compatOrig)
-			require.Equal(t, wantCompat, compatUpdated)
-			require.Equal(t, compatOrig != wantCompat, compatChanged)
-			if changed != tt.wantChanged {
-				t.Errorf("changed = %v, want %v", changed, tt.wantChanged)
-			}
-			if tt.box.Spec.Template != nil {
-				if orig != tt.wantOrig {
-					t.Errorf("orig = %v, want %v", orig, tt.wantOrig)
-				}
-				if updated != tt.wantUpdated {
-					t.Errorf("updated = %v, want %v", updated, tt.wantUpdated)
-				}
-			}
+			orig, updated, changed := CheckResizeQoSChange(tt.box, tt.pod)
+			require.Equal(t, tt.wantOrig, orig)
+			require.Equal(t, tt.wantUpdated, updated)
+			require.Equal(t, tt.wantChanged, changed)
 		})
 	}
 }
@@ -3468,90 +3234,80 @@ func TestDefaultBuildResizeContainers_MinimalFields(t *testing.T) {
 }
 
 func TestInPlaceUpdateControl_Update_ResizeBeforePatch(t *testing.T) {
-	for _, tt := range []struct {
-		name  string
-		mode  UpdateMode
-		order []string
-	}{
-		{name: "compatibility", mode: CompatibilityMode, order: []string{"resize", "patch"}},
-		{name: "target", mode: TargetConvergenceMode, order: []string{"patch", "resize", "patch"}},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			scheme := buildTestScheme(t)
-			pod := &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{Name: "p-order", Namespace: "default"},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{
-						Name:  "c",
-						Image: "img:1",
-						Resources: corev1.ResourceRequirements{
-							Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
-						},
-					}},
-				},
-				Status: corev1.PodStatus{
-					ContainerStatuses: []corev1.ContainerStatus{
-						{Name: "c", ImageID: "img:1@sha256:abc"},
+	t.Run("resize before patch", func(t *testing.T) {
+		scheme := buildTestScheme(t)
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "p-order", Namespace: "default"},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{
+					Name:  "c",
+					Image: "img:1",
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
 					},
+				}},
+			},
+			Status: corev1.PodStatus{
+				ContainerStatuses: []corev1.ContainerStatus{
+					{Name: "c", ImageID: "img:1@sha256:abc"},
 				},
-			}
-			box := &agentsv1alpha1.Sandbox{
-				Spec: agentsv1alpha1.SandboxSpec{
-					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
-						Template: &corev1.PodTemplateSpec{
-							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{{
-									Name:  "c",
-									Image: "img:2",
-									Resources: corev1.ResourceRequirements{
-										Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
-									},
-								}},
-							},
+			},
+		}
+		box := &agentsv1alpha1.Sandbox{
+			Spec: agentsv1alpha1.SandboxSpec{
+				EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+					Template: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{
+								Name:  "c",
+								Image: "img:2",
+								Resources: corev1.ResourceRequirements{
+									Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
+								},
+							}},
 						},
 					},
 				},
-			}
+			},
+		}
 
-			// Record the order of intent persistence, resize, image, and metadata
-			// finalization.
-			var callOrder []string
-			base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
-			wrapped := interceptor.NewClient(base, interceptor.Funcs{
-				SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object,
-					patch client.Patch, opts ...client.SubResourcePatchOption) error {
-					if sub == "resize" {
-						callOrder = append(callOrder, "resize")
-						// Simulate a successful resize by applying resources
-						return applyResizeSubresourcePatch(ctx, c, obj, patch)
-					}
-					return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
-				},
-				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch,
-					opts ...client.PatchOption) error {
-					callOrder = append(callOrder, "patch")
-					return c.Patch(ctx, obj, patch, opts...)
-				},
-			})
-
-			ctrl := NewInPlaceUpdateControl(wrapped, nil)
-			require.NoError(t, ctrl.Get(t.Context(), client.ObjectKeyFromObject(pod), pod))
-			progressed, err := ctrl.Update(context.Background(), InPlaceUpdateOptions{
-				Box:      box,
-				Pod:      pod,
-				Revision: "rev-order",
-				Mode:     tt.mode,
-			})
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if !progressed {
-				t.Fatalf("expected progressed=true")
-			}
-
-			require.Equal(t, tt.order, callOrder)
+		// Record the order of intent persistence, resize, image, and metadata
+		// finalization.
+		var callOrder []string
+		base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
+		wrapped := interceptor.NewClient(base, interceptor.Funcs{
+			SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+				patch client.Patch, opts ...client.SubResourcePatchOption) error {
+				if sub == "resize" {
+					callOrder = append(callOrder, "resize")
+					// Simulate a successful resize by applying resources
+					return applyResizeSubresourcePatch(ctx, c, obj, patch)
+				}
+				return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
+			},
+			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch,
+				opts ...client.PatchOption) error {
+				callOrder = append(callOrder, "patch")
+				return c.Patch(ctx, obj, patch, opts...)
+			},
 		})
-	}
+
+		ctrl := NewInPlaceUpdateControl(wrapped, nil)
+		require.NoError(t, ctrl.Get(t.Context(), client.ObjectKeyFromObject(pod), pod))
+		progressed, err := ctrl.Update(context.Background(), InPlaceUpdateOptions{
+			Box:      box,
+			Pod:      pod,
+			Revision: "rev-order",
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !progressed {
+			t.Fatalf("expected progressed=true")
+		}
+
+		require.Equal(t, []string{"resize", "patch"}, callOrder)
+	})
 }
 
 func TestResourceListContains(t *testing.T) {

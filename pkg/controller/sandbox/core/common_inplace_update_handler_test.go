@@ -202,7 +202,7 @@ func TestHandleInPlaceUpdateCommon(t *testing.T) {
 					Name:      "test-pod",
 					Namespace: "default",
 					Labels: map[string]string{
-						agentsv1alpha1.PodLabelTemplateHash: "some-hash",
+						agentsv1alpha1.PodLabelTemplateHash: "test-revision",
 					},
 					Annotations: map[string]string{
 						// Previous inplace update completed (no updateImages/updateResources flags)
@@ -1245,9 +1245,13 @@ func TestHandleInPlaceUpdateCommon_StateNotNilCompleted(t *testing.T) {
 		UpdateRevision: "new-revision",
 	}
 
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
 	recorder := createTestRecorder()
 	handler := &MockInPlaceUpdateHandler{
-		control:  inplaceupdate.NewInPlaceUpdateControl(nil, inplaceupdate.DefaultGeneratePatchBodyFunc),
+		control:  inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
 		recorder: recorder,
 		logger:   logr.Discard(),
 	}
@@ -1259,11 +1263,14 @@ func TestHandleInPlaceUpdateCommon_StateNotNilCompleted(t *testing.T) {
 	if !result {
 		t.Error("Expected result true (completed), got false")
 	}
+	stored := &corev1.Pod{}
+	require.NoError(t, fakeClient.Get(ctx, client.ObjectKeyFromObject(pod), stored))
+	require.Equal(t, "new-revision", stored.Labels[agentsv1alpha1.PodLabelTemplateHash])
 }
 
 func TestHandleInPlaceUpdateCommon_StateNotNilNotCompletedTerminalErr(t *testing.T) {
-	// state != nil, resize pending infeasible → not completed, terminalErr != nil
-	// → log and return false, nil
+	// A new target supersedes an infeasible earlier resize by delivering its
+	// revision instead of waiting forever on the previous state.
 	ctx := context.Background()
 
 	podSpec := corev1.PodSpec{
@@ -1305,9 +1312,13 @@ func TestHandleInPlaceUpdateCommon_StateNotNilNotCompletedTerminalErr(t *testing
 		UpdateRevision: "new-revision",
 	}
 
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
 	recorder := createTestRecorder()
 	handler := &MockInPlaceUpdateHandler{
-		control:  inplaceupdate.NewInPlaceUpdateControl(nil, inplaceupdate.DefaultGeneratePatchBodyFunc),
+		control:  inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
 		recorder: recorder,
 		logger:   logr.Discard(),
 	}
@@ -1316,14 +1327,16 @@ func TestHandleInPlaceUpdateCommon_StateNotNilNotCompletedTerminalErr(t *testing
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
-	if result {
-		t.Error("Expected result false (not completed), got true")
+	if !result {
+		t.Error("Expected result true after replacing the previous target, got false")
 	}
+	stored := &corev1.Pod{}
+	require.NoError(t, fakeClient.Get(ctx, client.ObjectKeyFromObject(pod), stored))
+	require.Equal(t, "new-revision", stored.Labels[agentsv1alpha1.PodLabelTemplateHash])
 }
 
 func TestHandleInPlaceUpdateCommon_StateNotNilNotCompletedNoTerminalErr(t *testing.T) {
-	// state != nil, resource update in progress but no terminal error
-	// → not completed, return false, nil
+	// A new target also supersedes an earlier nonterminal resize.
 	ctx := context.Background()
 
 	podSpec := corev1.PodSpec{
@@ -1367,9 +1380,13 @@ func TestHandleInPlaceUpdateCommon_StateNotNilNotCompletedNoTerminalErr(t *testi
 		UpdateRevision: "new-revision",
 	}
 
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
 	recorder := createTestRecorder()
 	handler := &MockInPlaceUpdateHandler{
-		control:  inplaceupdate.NewInPlaceUpdateControl(nil, inplaceupdate.DefaultGeneratePatchBodyFunc),
+		control:  inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
 		recorder: recorder,
 		logger:   logr.Discard(),
 	}
@@ -1378,9 +1395,12 @@ func TestHandleInPlaceUpdateCommon_StateNotNilNotCompletedNoTerminalErr(t *testi
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
-	if result {
-		t.Error("Expected result false (resource resize in progress), got true")
+	if !result {
+		t.Error("Expected result true after replacing the previous target, got false")
 	}
+	stored := &corev1.Pod{}
+	require.NoError(t, fakeClient.Get(ctx, client.ObjectKeyFromObject(pod), stored))
+	require.Equal(t, "new-revision", stored.Labels[agentsv1alpha1.PodLabelTemplateHash])
 }
 
 func TestHandleInPlaceUpdateCommon_InplaceUpdateWithFakeClient(t *testing.T) {
@@ -1850,9 +1870,8 @@ func TestIsInplaceUpdateTerminal(t *testing.T) {
 	}
 }
 
-// The tests below exercise the shared engine with the SUO options, where a
-// new target may supersede an unfinished earlier round. Claim behaviour is
-// covered above through the adapter with the legacy inputs.
+// The tests below verify that a corrected latest target can supersede an
+// unfinished earlier round for both SUO and Claim callers.
 
 func TestInplaceEngine_ImagePullFailureAcceptsCorrectedTarget(t *testing.T) {
 	// A bad image does not block delivering a new target; the same Pod continues
@@ -1893,7 +1912,7 @@ func TestInplaceEngine_ImagePullFailureAcceptsCorrectedTarget(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
 	control := inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc)
 
-	step, err := handleInPlaceUpdateCommon(ctx, control, pod, box, "new-revision", upgradeInplaceEngineOptions)
+	step, err := handleInPlaceUpdateCommon(ctx, control, pod, box, "new-revision")
 	require.NoError(t, err)
 	require.Equal(t, inplaceUpdateStepPatchDelivered, step)
 
@@ -1909,8 +1928,9 @@ func TestInplaceEngine_ImagePullFailureAcceptsCorrectedTarget(t *testing.T) {
 	require.Equal(t, "docker://sha256:old", state.LastContainerStatuses["main"].ImageID)
 }
 
-func TestInplaceEngine_ClaimRejectsRepeatedUpdate(t *testing.T) {
-	// With the claim options the same inputs never deliver a second round.
+func TestInplaceEngine_ClaimAcceptsRepeatedUpdate(t *testing.T) {
+	// Claim follows the same latest-target-wins policy as SUO when a Pod still
+	// records an earlier in-place update.
 	ctx := context.Background()
 
 	scheme := runtime.NewScheme()
@@ -1935,34 +1955,20 @@ func TestInplaceEngine_ClaimRejectsRepeatedUpdate(t *testing.T) {
 		}
 	}
 
-	tests := []struct {
-		name    string
-		imageID string
-		class   inplaceErrorClass
-		wantErr bool
-	}{
-		{name: "previous round pending waits", imageID: "docker://sha256:old"},
-		{name: "previous round completed is forbidden", imageID: "docker://sha256:new", class: inplaceClassRepeatedUpdate, wantErr: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			pod := newPod(tt.imageID)
+	for _, imageID := range []string{"docker://sha256:old", "docker://sha256:new"} {
+		t.Run(imageID, func(t *testing.T) {
+			pod := newPod(imageID)
 			fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
 			control := inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc)
 
-			step, err := handleInPlaceUpdateCommon(ctx, control, pod, box, "new-revision", claimInplaceEngineOptions)
-			require.Equal(t, inplaceUpdateStepInProgress, step)
-			if tt.wantErr {
-				require.Error(t, err)
-				require.Equal(t, tt.class, classifyInplaceError(err))
-				require.True(t, isTerminalInplaceError(err))
-			} else {
-				require.NoError(t, err)
-			}
+			step, err := handleInPlaceUpdateCommon(ctx, control, pod, box, "new-revision")
+			require.NoError(t, err)
+			require.Equal(t, inplaceUpdateStepPatchDelivered, step)
+
 			stored := &corev1.Pod{}
 			require.NoError(t, fakeClient.Get(ctx, client.ObjectKeyFromObject(pod), stored))
-			require.Equal(t, "old-revision", stored.Labels[agentsv1alpha1.PodLabelTemplateHash], "nothing may be written")
-			require.Equal(t, "nginx:bad", stored.Spec.Containers[0].Image)
+			require.Equal(t, "new-revision", stored.Labels[agentsv1alpha1.PodLabelTemplateHash])
+			require.Equal(t, "nginx:fixed", stored.Spec.Containers[0].Image)
 		})
 	}
 }
@@ -2107,7 +2113,7 @@ func TestInplaceEngineSteps(t *testing.T) {
 			})
 			control := inplaceupdate.NewInPlaceUpdateControl(wrapped, inplaceupdate.DefaultGeneratePatchBodyFunc)
 			before := box.DeepCopy()
-			step, err := handleInPlaceUpdateCommon(t.Context(), control, pod, box, "target", upgradeInplaceEngineOptions)
+			step, err := handleInPlaceUpdateCommon(t.Context(), control, pod, box, "target")
 			require.Equal(t, before, box, "the engine must not read or write Sandbox conditions")
 			require.Equal(t, tt.step, step)
 			if tt.hasError {
@@ -2129,7 +2135,7 @@ func TestInplaceEngineSteps(t *testing.T) {
 				require.Equal(t, original.Status, current.Status)
 				require.Equal(t, "old", current.Labels[agentsv1alpha1.PodLabelTemplateHash])
 				failWrites = false
-				step, err := handleInPlaceUpdateCommon(t.Context(), control, current, box, "target", upgradeInplaceEngineOptions)
+				step, err := handleInPlaceUpdateCommon(t.Context(), control, current, box, "target")
 				require.NoError(t, err)
 				require.Equal(t, inplaceUpdateStepSucceeded, step)
 				require.Equal(t, 1, resizes)
@@ -2169,7 +2175,6 @@ func TestInplaceErrorPolicy(t *testing.T) {
 		{"invalid", apierrors.NewInvalid(schema.GroupKind{Kind: "Pod"}, "pod", nil), true},
 		{"resize unsupported", &inplaceupdate.ResizeNotSupportedError{Err: fmt.Errorf("unsupported")}, true},
 		{"resize infeasible", &inplaceupdate.ResizeInfeasibleError{Message: "infeasible"}, true},
-		{"image failure", &inplaceupdate.ImagePullFailedError{Reason: "InvalidImageName"}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

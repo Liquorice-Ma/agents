@@ -479,8 +479,9 @@ func (r *UpgradeControl) executeUpgradePodStep(ctx context.Context, args EnsureF
 }
 
 // performInplaceUpgrade only returns the shared engine's step and error; the
-// Condition is mapped by the outer adapter. A new SUO can correct an unfinished
-// image target and is not blocked by a previous round's failure or a not-Ready Pod.
+// Condition is mapped by the outer adapter. A new target can correct an
+// unfinished image target and is not blocked by a previous round's failure or
+// a not-Ready Pod.
 func (r *UpgradeControl) performInplaceUpgrade(ctx context.Context, args EnsureFuncArgs) (inplaceUpdateStepResult, error) {
 	pod, box := args.Pod, args.Box
 	if pod == nil {
@@ -500,7 +501,7 @@ func (r *UpgradeControl) performInplaceUpgrade(ctx context.Context, args EnsureF
 	if r.inplaceUpdateControl == nil {
 		return inplaceUpdateStepInProgress, fmt.Errorf("in-place upgrade is not configured for sandbox %s/%s", box.Namespace, box.Name)
 	}
-	return handleInPlaceUpdateCommon(ctx, r.inplaceUpdateControl, pod, box, args.NewStatus.UpdateRevision, upgradeInplaceEngineOptions)
+	return handleInPlaceUpdateCommon(ctx, r.inplaceUpdateControl, pod, box, args.NewStatus.UpdateRevision)
 }
 
 // performRecreateUpgrade handles the Recreate upgrade step (delete old pod + create new pod).

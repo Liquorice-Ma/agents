@@ -393,13 +393,11 @@ var _ = Describe("InplaceUpdate Upgrade via SandboxUpdateOps", func() {
 				"pod command should remain original")
 		})
 
-		It("should fail terminally when resource resize changes QoS class", func() {
-			labelValue := fmt.Sprintf("inplace-qos-fail-%d", time.Now().UnixNano())
-			sbx := newInplaceSandbox(fmt.Sprintf("inplace-qos-fail-%d", time.Now().UnixNano()), labelValue)
+		It("should complete when the pod resources cover the requested target", func() {
+			labelValue := fmt.Sprintf("inplace-qos-covered-%d", time.Now().UnixNano())
+			sbx := newInplaceSandbox(fmt.Sprintf("inplace-qos-covered-%d", time.Now().UnixNano()), labelValue)
 			// Start Guaranteed: every container (including the sidecar init
 			// container) must have request==limit for both CPU and memory.
-			// computeQoSClass iterates all containers; if any lacks limits the
-			// pod is Burstable and the patch below would not change QoS.
 			sbx.Spec.Template.Spec.InitContainers[0].Resources = corev1.ResourceRequirements{
 				Requests: corev1.ResourceList{
 					corev1.ResourceCPU:    resource.MustParse("100m"),
@@ -423,9 +421,9 @@ var _ = Describe("InplaceUpdate Upgrade via SandboxUpdateOps", func() {
 			Expect(k8sClient.Create(ctx, sbx)).To(Succeed())
 			waitSandboxRunning(sbx)
 
-			By("Creating SandboxUpdateOps to lower CPU request (Guaranteed -> Burstable)")
+			By("Creating SandboxUpdateOps with a CPU target covered by the pod")
 			ops := newInplaceOps(
-				fmt.Sprintf("ops-qos-fail-%d", time.Now().UnixNano()),
+				fmt.Sprintf("ops-qos-covered-%d", time.Now().UnixNano()),
 				labelValue,
 				agentsv1alpha1.SandboxUpdateOpsStrategyInplaceUpdate,
 				patchImageAndResources(initialImage,
@@ -435,15 +433,15 @@ var _ = Describe("InplaceUpdate Upgrade via SandboxUpdateOps", func() {
 			)
 			Expect(k8sClient.Create(ctx, ops)).To(Succeed())
 
-			By("Verifying sandbox stays Upgrading with UpgradePodFailed")
-			waitUpgradePodFailed(sbx, 3*time.Minute)
+			By("Verifying SandboxUpdateOps completes")
+			waitOpsPhase(ops, agentsv1alpha1.SandboxUpdateOpsCompleted, 3*time.Minute)
 
-			By("Verifying pod QoS remains Guaranteed (resize rejected)")
+			By("Verifying pod QoS remains Guaranteed")
 			pod := &corev1.Pod{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbx.Name, Namespace: sbx.Namespace}, pod)).To(Succeed())
 			Expect(pod.Status.QOSClass).To(Equal(corev1.PodQOSGuaranteed))
 
-			By("Verifying pod spec resources remain original (500m/500m)")
+			By("Verifying pod spec resources remain the automatic 500m values")
 			req := pod.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]
 			lim := pod.Spec.Containers[0].Resources.Limits[corev1.ResourceCPU]
 			Expect(req.MilliValue()).To(Equal(int64(500)), "pod spec request should remain 500m")
